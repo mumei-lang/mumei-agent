@@ -29,11 +29,14 @@ import argparse
 import hashlib
 import json
 import os
+from itertools import islice
 import sys
 from pathlib import Path
 
 from agent import native_accept, native_observations_accept, native_recheck
 from agent.native_bundle import (
+    FILE_MEMBERS,
+    MAX_MEMBER_SEGMENTS,
     MAX_RECORD_BYTES,
     MAX_SOURCE_BYTES,
     RECORD_FILE,
@@ -43,6 +46,17 @@ from agent.native_bundle import (
 
 REPORT_SCHEMA = "mumei.verify-distribution-report/v1"
 PROOF_CERT = "proof-cert.json"
+EXECUTABLE_MEMBER = FILE_MEMBERS["executable"]
+# Mirror of the Core source-member bound used only to bound exact-layout
+# enumeration; Core remains authoritative for record admission.
+MAX_BUNDLE_SOURCE_FILES = 64
+# A raw bundle can contain at most 1 record + 4 components + bounded source
+# members. In the worst case each source member contributes its own file
+# plus MAX_MEMBER_SEGMENTS - 1 parent directories below the shared
+# sources/ root. The exact-layout scan therefore stays bounded without
+# rejecting a layout the Core profile can produce.
+MAX_LAYOUT_ENTRIES = 5 + 1 + MAX_BUNDLE_SOURCE_FILES * MAX_MEMBER_SEGMENTS
+MAX_LAYOUT_DEPTH = MAX_MEMBER_SEGMENTS + 1  # plus the sources/ prefix
 
 ROLE_STATUSES = frozenset(
     {"accepted", "skipped", "failed", "inconclusive", "unsupported"}
@@ -113,6 +127,15 @@ def build_distribution_parser(
         ),
     )
     parser.add_argument(
+        "--require-exact-bundle-layout",
+        action="store_true",
+        help=(
+            "Require the raw native-bundle build layout: only declared "
+            "members, regular non-symlink files, and an executable program. "
+            "Off by default; packaging may add README/LICENSE/install files."
+        ),
+    )
+    parser.add_argument(
         "--output", metavar="PATH",
         help="Write the role-separated report JSON here instead of stdout.",
     )
@@ -125,6 +148,84 @@ def _sha256(path: Path) -> str:
 
 def _is_build_id(value: str) -> bool:
     return len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
+def _layout_directories(members: list[str]) -> set[str]:
+    directories = set()
+    for member in members:
+        parts = member.split("/")
+        for index in range(1, len(parts)):
+            directories.add("/".join(parts[:index]))
+    return directories
+
+
+def _validate_exact_layout(bundle: Path, members: list[str]) -> None:
+    """Validate raw bundle layout as input shape, not as evidence.
+
+    This opt-in check is intentionally stricter than the consumer routes:
+    packaged distributions may carry README/LICENSE/install files, while a
+    raw `native-bundle build` directory should contain only the members its
+    record declares. It does not authenticate those members; the reused Core
+    routes remain authoritative for identity and semantic outcomes.
+    """
+    expected_files = set(members)
+    expected_dirs = _layout_directories(members)
+    entry_kinds = {}
+    entries = 0
+    stack = [(bundle, "")]
+    while stack:
+        directory, relative = stack.pop()
+        try:
+            with os.scandir(directory) as scan:
+                children = sorted(
+                    islice(scan, MAX_LAYOUT_ENTRIES + 1), key=lambda entry: entry.name
+                )
+        except OSError as exc:
+            raise ValueError("cannot inspect bundle layout") from exc
+        for child in children:
+            entries += 1
+            if entries > MAX_LAYOUT_ENTRIES:
+                raise ValueError("bundle layout exceeds the exact-layout entry bound")
+            member = child.name if not relative else f"{relative}/{child.name}"
+            depth = member.count("/") + 1
+            if depth > MAX_LAYOUT_DEPTH:
+                raise ValueError("bundle layout exceeds the exact-layout depth bound")
+            try:
+                is_symlink = child.is_symlink()
+                is_dir = child.is_dir(follow_symlinks=False)
+                is_file = child.is_file(follow_symlinks=False)
+            except OSError as exc:
+                raise ValueError("cannot inspect bundle layout entry") from exc
+            if is_symlink:
+                entry_kinds[member] = "symlink"
+                if member in expected_files or member in expected_dirs:
+                    raise ValueError(f"declared bundle path is a symlink: {member}")
+                raise ValueError("bundle layout contains an undeclared symlink")
+            if is_dir:
+                entry_kinds[member] = "directory"
+                if member not in expected_dirs:
+                    raise ValueError("bundle layout contains an undeclared directory")
+                stack.append((Path(child.path), member))
+                continue
+            if is_file:
+                entry_kinds[member] = "file"
+                if member not in expected_files:
+                    raise ValueError("bundle layout contains an undeclared file")
+                continue
+            entry_kinds[member] = "other"
+            if member in expected_files or member in expected_dirs:
+                raise ValueError(f"declared bundle path is not a regular file: {member}")
+            raise ValueError("bundle layout contains an undeclared non-regular file")
+
+    for member in sorted(expected_files):
+        kind = entry_kinds.get(member)
+        if kind is None:
+            raise ValueError(f"declared bundle member is missing: {member}")
+        if kind != "file":
+            raise ValueError(f"declared bundle member is not a regular file: {member}")
+    executable = bundle / EXECUTABLE_MEMBER
+    if EXECUTABLE_MEMBER in expected_files and not os.access(executable, os.X_OK):
+        raise ValueError(f"bundle executable member is not executable: {EXECUTABLE_MEMBER}")
 
 
 def _check_common(args: argparse.Namespace) -> dict:
@@ -176,6 +277,8 @@ def _check_common(args: argparse.Namespace) -> dict:
     # per-route validation again; this check only prevents partial reports
     # for inputs no route can consume.
     members = declared_members(bundle)
+    if getattr(args, "require_exact_bundle_layout", False):
+        _validate_exact_layout(bundle, members)
     for member in members:
         member_path = bundle / member
         if not member_path.is_file():

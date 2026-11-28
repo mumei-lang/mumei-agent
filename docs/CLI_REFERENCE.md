@@ -67,7 +67,7 @@ A bare `python -m agent <file>` invocation uses `heal` mode. The `mumei-heal`,
 | `verify-attempt` | 8 | Run a declared Core source-evidence production as one attempt and emit the reconciled lineage plus the live representation check record and its acceptance evaluation. |
 | `verify-recheck` | 8 | Run a declared Core source-evidence recheck as one attempt and emit the reconciled lineage plus the declared recheck outcome. |
 | `verify-accept` | 8 | Run a declared Core source-evidence acceptance evaluation as one attempt and emit the reconciled lineage plus the declared acceptance outcome. |
-| `verify-distribution` | 8 | Verify a native-first distribution through the existing declared consumer routes and emit a role-separated JSON report. This is thin orchestration, not a deep acceptance fold. Exit 0 requires every non-skipped role to be accepted; unsupported or unclaimed non-completion exits 1, and explicit Core inconclusive exits 3. That exit code is an orchestration signal, not a unified verdict. |
+| `verify-distribution` | 9 | Verify a native-first distribution through the existing declared consumer routes and emit a role-separated JSON report. This is thin orchestration, not a deep acceptance fold. Exit 0 requires every non-skipped role to be accepted; unsupported or unclaimed non-completion exits 1, and explicit Core inconclusive exits 3. That exit code is an orchestration signal, not a unified verdict. |
 | `verify-schedule` | 17 | Run the declared plan/dispatch/observe/fallback schedule over declared adapter manifests and emit mumei.attempt-schedule/v1. The schedule is a dispatch record, not an Evidence acceptance. |
 | `verify-plan` | 8 | Plan one declared route through the adapter registry and emit mumei.verification-plan/v1 — the selected adapter, its effective non-secret settings, per-candidate selection/exclusion reasons and the fallback origin. Planning only: nothing is spawned, dispatched or accepted. |
 | `native-recheck` | 7 | Run a declared Core native consumer recheck as one attempt and emit the reconciled lineage plus the declared recheck outcome. |
@@ -1067,6 +1067,7 @@ Verify a native-first distribution through the existing declared consumer routes
 | `--enable-runtime-observations` | — | no | — | Execute the distributed program once through the existing native-observations-accept route. Off by default; enable only when the declared source and bundle are trusted. |
 | `--attempt-timeout` | `<<MS>>` | no | 60000 | Declared timeout in milliseconds for each reused attempt route. |
 | `--memory-bound-mb` | `<<MB>>` | no | — | Optional declared POSIX RLIMIT_AS ceiling passed unchanged to each reused attempt route. |
+| `--require-exact-bundle-layout` | — | no | — | Require the raw native-bundle build layout: only declared members, regular non-symlink files, and an executable program. Off by default; packaging may add README/LICENSE/install files. |
 | `--output` | `<PATH>` | no | — | Write the role-separated report JSON here instead of stdout. |
 
 
