@@ -9347,6 +9347,11 @@ func tokenMatches(presented, stored string) bool {
     return presented == stored // direct comparison
 }
 """
+    go_independent_credential = """package main
+func secretTokenTypeMatches(presented, stored string) bool {
+    return presented == stored
+}
+"""
     python = """def token_matches(provided, expected):
     if len(provided) != len(expected):
         return False
@@ -9355,10 +9360,18 @@ func tokenMatches(presented, stored string) bool {
             return False
     return True
 """
+    python_independent_credential = """def secret_token_type_matches(provided, expected):
+    for a, b in zip(provided, expected):
+        if a != b:
+            return False
+    return True
+"""
     for language, source, function in (
         ("go", go, "tokenMatches"),
         ("go", go_with_comment, "tokenMatches"),
+        ("go", go_independent_credential, "secretTokenTypeMatches"),
         ("python", python, "token_matches"),
+        ("python", python_independent_credential, "secret_token_type_matches"),
     ):
         issues = [
             issue for issue in _detect_safety_issues(source, language)
@@ -9405,6 +9418,11 @@ func secretaryMatches(presented, stored string) bool {
 }
 """),
         ("go", """package main
+func tokenTypeMatches(presented, stored string) bool {
+    return presented == stored
+}
+"""),
+        ("go", """package main
 func tokenMatches(presented, stored string) bool {
     return len(presented) == len(stored)
 }
@@ -9444,6 +9462,12 @@ def can_read(doc, api_key, token):
     return True
 """),
         ("python", """def secretary_matches(provided, expected):
+    for a, b in zip(provided, expected):
+        if a != b:
+            return False
+    return True
+"""),
+        ("python", """def token_type_matches(provided, expected):
     for a, b in zip(provided, expected):
         if a != b:
             return False

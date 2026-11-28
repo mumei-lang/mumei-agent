@@ -540,13 +540,17 @@ _CREDENTIAL_NAME_PART = re.compile(
 )
 
 
-def _is_hardcoded_secret_name(name: str) -> bool:
-    """True when a credential word is a whole lexical word in ``name``."""
-    words = [
+def _credential_name_words(name: str) -> list[str]:
+    return [
         match.group(0).lower()
         for component in re.split(r"[._$\-]+", name)
         for match in _CREDENTIAL_NAME_PART.finditer(component)
     ]
+
+
+def _is_hardcoded_secret_name(name: str) -> bool:
+    """True when a credential word is a whole lexical word in ``name``."""
+    words = _credential_name_words(name)
     if words and words[-1] in {
         "header",
         "headername",
@@ -564,6 +568,21 @@ def _is_hardcoded_secret_name(name: str) -> bool:
         or any(pair in _CREDENTIAL_KEY_PAIRS for pair in zip(words, words[1:]))
     )
 
+
+
+
+def _is_timing_credential_function_name(name: str) -> bool:
+    """Credential-purpose evidence for timing comparison, excluding type metadata."""
+    words = _credential_name_words(name)
+    single_word_hit = any(
+        word in _CREDENTIAL_WORDS and (index + 1 >= len(words) or words[index + 1] != "type")
+        for index, word in enumerate(words)
+    )
+    key_pair_hit = any(
+        pair in _CREDENTIAL_KEY_PAIRS and (index + 2 >= len(words) or words[index + 2] != "type")
+        for index, pair in enumerate(zip(words, words[1:]))
+    )
+    return single_word_hit or key_pair_hit
 
 def _is_placeholder_secret_value(value: str) -> bool:
     stripped = value.strip()
@@ -878,7 +897,7 @@ def _go_timing_credential_issues(source: str) -> list[ForeignSafetyIssue]:
                 stack.extend(reversed(node.children))
                 continue
             function_name = _node_text(source_bytes, name_node)
-            if _is_hardcoded_secret_name(function_name):
+            if _is_timing_credential_function_name(function_name):
                 ret = _go_direct_string_equality_return(node, source_bytes)
                 if ret is not None:
                     issues.append(ForeignSafetyIssue(
@@ -946,7 +965,7 @@ def _python_timing_credential_issues(source: str) -> list[ForeignSafetyIssue]:
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        if not _is_hardcoded_secret_name(node.name):
+        if not _is_timing_credential_function_name(node.name):
             continue
         loop = _python_early_exit_compare_loop(node)
         if loop is None:
