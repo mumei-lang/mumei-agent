@@ -340,6 +340,14 @@ def verify_artifact(
         raise ArtifactVerificationError("migration execution candidate count is inconsistent")
     if type(status.get("ready_count")) is not int or status["ready_count"] != computed_counts["ready_for_human_review"]:
         raise ArtifactVerificationError("migration execution ready count is inconsistent")
+    if not candidates and not allow_zero_candidates:
+        raise ArtifactVerificationError(
+            "zero migration candidates: no blocked/ready review evidence exists "
+            "to verify, so the verifier fails closed. This is a review-evidence "
+            "policy outcome, not an operational failure and not a verification "
+            "failure; pass --allow-zero-candidates only when zero candidates is "
+            "the intended outcome for the audited input"
+        )
     if candidates:
         if summary.get("review_required") is not True or status.get("review_required") is not True:
             raise ArtifactVerificationError("blocked/ready migration execution evidence must require human review")
@@ -353,14 +361,9 @@ def verify_artifact(
             raise ArtifactVerificationError("zero-candidate migration execution missing-selection evidence is malformed")
         if missing_requested:
             raise ArtifactVerificationError("zero-candidate migration execution evidence has missing requested functions")
-    elif summary.get("review_required") is not True or status.get("review_required") is not True:
-        raise ArtifactVerificationError("blocked/ready migration execution evidence must require human review")
     if computed_counts["operational_error"] != 0:
         raise ArtifactVerificationError("successful action artifact contains candidate operational_error")
-    if (
-        computed_counts["blocked"] + computed_counts["ready_for_human_review"] != len(candidates)
-        or (not candidates and not allow_zero_candidates)
-    ):
+    if computed_counts["blocked"] + computed_counts["ready_for_human_review"] != len(candidates):
         raise ArtifactVerificationError("successful action artifact does not consist of blocked/ready review evidence")
     if require_blocked_candidate and computed_counts["blocked"] == 0:
         raise ArtifactVerificationError("fixed selftest artifact does not exercise the blocked review path")
