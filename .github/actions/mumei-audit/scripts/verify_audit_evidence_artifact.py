@@ -217,14 +217,17 @@ def verify_artifact(root: Path, *, require_hidden_companion: bool, forbidden_lit
         if not isinstance(candidate, dict) or candidate.get("execution_state") not in STATES:
             raise ArtifactVerificationError("migration execution candidate has an unknown execution state")
         computed_counts[candidate["execution_state"]] += 1
+    status_counts = status.get("counts")
+    if not isinstance(status_counts, dict):
+        raise ArtifactVerificationError("migration execution status counts are missing")
     for state in STATES:
-        if summary.get(state) != computed_counts[state]:
+        if type(summary.get(state)) is not int or summary[state] != computed_counts[state]:
             raise ArtifactVerificationError("migration execution summary counts are inconsistent")
-    if summary.get("candidate_count") != len(candidates):
+        if type(status_counts.get(state)) is not int or status_counts[state] != computed_counts[state]:
+            raise ArtifactVerificationError("migration execution status counts are inconsistent")
+    if type(summary.get("candidate_count")) is not int or summary["candidate_count"] != len(candidates):
         raise ArtifactVerificationError("migration execution candidate count is inconsistent")
-    if status.get("counts") != computed_counts:
-        raise ArtifactVerificationError("migration execution status counts are inconsistent")
-    if status.get("ready_count") != computed_counts["ready_for_human_review"]:
+    if type(status.get("ready_count")) is not int or status["ready_count"] != computed_counts["ready_for_human_review"]:
         raise ArtifactVerificationError("migration execution ready count is inconsistent")
     if summary.get("review_required") is not True or status.get("review_required") is not True:
         raise ArtifactVerificationError("blocked/ready migration execution evidence must require human review")
