@@ -817,6 +817,136 @@ def _python_hardcoded_secret_issues(source: str) -> list[ForeignSafetyIssue]:
     return issues
 
 
+def _go_string_parameter_names(function_node, source_bytes: bytes) -> set[str]:
+    parameters = function_node.child_by_field_name("parameters")
+    if parameters is None:
+        return set()
+    names: set[str] = set()
+    for parameter in parameters.named_children:
+        if parameter.type != "parameter_declaration":
+            continue
+        type_name = None
+        identifiers = []
+        for child in parameter.named_children:
+            if child.type == "identifier":
+                identifiers.append(_node_text(source_bytes, child))
+            elif child.type in {"type_identifier", "qualified_type"}:
+                type_name = _node_text(source_bytes, child)
+        if type_name == "string":
+            names.update(identifiers)
+    return names
+
+
+def _go_direct_string_equality_return(function_node, source_bytes: bytes):
+    string_params = _go_string_parameter_names(function_node, source_bytes)
+    block = next((child for child in function_node.named_children if child.type == "block"), None)
+    statements = next((child for child in block.named_children if child.type == "statement_list"), None) if block else None
+    if statements is None or len(statements.named_children) != 1:
+        return None
+    ret = statements.named_children[0]
+    if ret.type != "return_statement":
+        return None
+    expressions = next((child for child in ret.named_children if child.type == "expression_list"), None)
+    comparison = expressions.named_children[0] if expressions is not None and len(expressions.named_children) == 1 else None
+    if comparison is None or comparison.type != "binary_expression":
+        return None
+    operands = [child for child in comparison.children if child.type == "identifier"]
+    operator = next((child for child in comparison.children if child.type == "=="), None)
+    if (
+        operator is not None
+        and len(operands) == 2
+        and all(_node_text(source_bytes, operand) in string_params for operand in operands)
+    ):
+        return ret
+    return None
+
+
+def _go_timing_credential_issues(source: str) -> list[ForeignSafetyIssue]:
+    tree, source_bytes = tree_sitter_extract.parse(source, "go")
+    if tree is None or source_bytes is None:
+        return []
+    issues: list[ForeignSafetyIssue] = []
+    stack = [tree.root_node]
+    while stack:
+        node = stack.pop()
+        if node.type == "function_declaration":
+            name_node = node.child_by_field_name("name")
+            if name_node is None:
+                stack.extend(reversed(node.children))
+                continue
+            function_name = _node_text(source_bytes, name_node)
+            if _is_hardcoded_secret_name(function_name):
+                ret = _go_direct_string_equality_return(node, source_bytes)
+                if ret is not None:
+                    issues.append(ForeignSafetyIssue(
+                        function_name=function_name,
+                        message=(f"Go function `{function_name}` uses non-constant-time credential "
+                                 "comparison that may expose a timing side channel"),
+                        line=ret.start_point[0] + 1,
+                    ))
+        stack.extend(reversed(node.children))
+    return issues
+
+
+def _python_early_exit_compare_loop(function: ast.FunctionDef | ast.AsyncFunctionDef) -> ast.For | None:
+    for statement in function.body:
+        if not isinstance(statement, ast.For):
+            continue
+        if not isinstance(statement.iter, ast.Call) or not isinstance(statement.iter.func, ast.Name):
+            continue
+        if statement.iter.func.id != "zip" or len(statement.iter.args) != 2:
+            continue
+        if not all(isinstance(arg, ast.Name) for arg in statement.iter.args):
+            continue
+        if len(statement.body) != 1 or not isinstance(statement.body[0], ast.If):
+            continue
+        test = statement.body[0].test
+        if (
+            isinstance(test, ast.Compare)
+            and len(test.ops) == 1
+            and isinstance(test.ops[0], ast.NotEq)
+            and isinstance(test.left, ast.Name)
+            and len(test.comparators) == 1
+            and isinstance(test.comparators[0], ast.Name)
+            and len(statement.body[0].body) == 1
+            and isinstance(statement.body[0].body[0], ast.Return)
+            and isinstance(statement.body[0].body[0].value, ast.Constant)
+            and statement.body[0].body[0].value.value is False
+        ):
+            return statement
+    return None
+
+
+def _python_timing_credential_issues(source: str) -> list[ForeignSafetyIssue]:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    issues: list[ForeignSafetyIssue] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not _is_hardcoded_secret_name(node.name):
+            continue
+        loop = _python_early_exit_compare_loop(node)
+        if loop is not None:
+            issues.append(ForeignSafetyIssue(
+                function_name=node.name,
+                message=(f"Python function `{node.name}` uses early-exit credential comparison "
+                         "that may expose a timing side channel"),
+                line=loop.lineno,
+            ))
+    return issues
+
+
+def _timing_credential_issues(source: str, language: str) -> list[ForeignSafetyIssue]:
+    if language == "go":
+        return _go_timing_credential_issues(source)
+    if language == "python":
+        return _python_timing_credential_issues(source)
+    return []
+
+
 def _hardcoded_secret_issues(source: str, language: str) -> list[ForeignSafetyIssue]:
     if language == "python":
         return _python_hardcoded_secret_issues(source)
@@ -828,7 +958,7 @@ def _hardcoded_secret_issues(source: str, language: str) -> list[ForeignSafetyIs
 def _with_hardcoded_secret_issues(
     issues: list[ForeignSafetyIssue], source: str, language: str
 ) -> list[ForeignSafetyIssue]:
-    return [*issues, *_hardcoded_secret_issues(source, language)]
+    return [*issues, *_hardcoded_secret_issues(source, language), *_timing_credential_issues(source, language)]
 
 
 def _is_generated_source(source: str) -> bool:

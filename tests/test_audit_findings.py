@@ -32,6 +32,7 @@ def test_code_findings_expose_verification_basis_and_confidence() -> None:
             "body-port: withdraw — status=refuted counterexample {'x': 1}",
             "native-replay: transfer violates contract",
             "Python hardcoded credential constant `ADMIN_TOKEN` is stored directly in source",
+            "Go function `tokenMatches` uses non-constant-time credential comparison that may expose a timing side channel",
             "checksum mismatch",
         ],
     )
@@ -44,11 +45,14 @@ def test_code_findings_expose_verification_basis_and_confidence() -> None:
     hardcoded = rows["Python hardcoded credential constant `ADMIN_TOKEN` is stored directly in source"]
     assert hardcoded["verification_basis"] == "deterministic-static-analysis"
     assert hardcoded["confidence"] == "high"
+    timing = rows["Go function `tokenMatches` uses non-constant-time credential comparison that may expose a timing side channel"]
+    assert timing["verification_basis"] == "deterministic-static-analysis"
+    assert timing["confidence"] == "high"
     assert rows["checksum mismatch"]["verification_basis"] == "deterministic-static-analysis"
     assert rows["checksum mismatch"]["confidence"] == "medium"
     assert all(row["category"] == "code" for row in rows.values())
     assert all(row["triage_bucket"] == "code_review" for row in rows.values())
-    assert len({row["fingerprint"] for row in rows.values()}) == 4
+    assert len({row["fingerprint"] for row in rows.values()}) == 5
 
 
 def test_spec_and_operational_findings_have_separate_categories() -> None:
