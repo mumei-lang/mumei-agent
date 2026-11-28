@@ -1321,3 +1321,27 @@ def test_migration_execution_unresolvable_names_are_never_deduped(tmp_path: Path
     report = build_migration_execution(result, output_path=output, mumei_client=FakeVerifyClient())
 
     assert len(report["candidates"]) == 2
+
+
+def test_migration_execution_keeps_distinct_skeletons_for_the_same_definition(tmp_path: Path) -> None:
+    source = tmp_path / "groups.py"
+    source.write_text(
+        "class Resolver:\n"
+        "    def resolve(self, group: str) -> str:\n"
+        "        return group\n",
+        encoding="utf-8",
+    )
+    skel_a = "atom resolve(x: i64) -> i64 {\n    requires: x >= 0;\n    ensures: result >= 0;\n    body: {\n        x\n    }\n}"
+    skel_b = skel_a[:-1]  # one trailing newline removed: distinct skeleton text
+    result = _result(
+        source,
+        [_hint("resolve", skel_a), _hint("Resolver.resolve", skel_b)],
+    )
+    output = tmp_path / "execution.json"
+
+    report = build_migration_execution(result, output_path=output, mumei_client=FakeVerifyClient())
+
+    # Same definition span, but the skeletons differ by one character: both
+    # candidates carry distinct review evidence and must not be merged.
+    assert len(report["candidates"]) == 2
+    assert {c["function_name"] for c in report["candidates"]} == {"resolve", "Resolver.resolve"}

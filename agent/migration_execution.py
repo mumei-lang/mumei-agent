@@ -903,7 +903,7 @@ def build_migration_execution(
         occurrence = occurrences.get(occurrence_key, 0)
         occurrences[occurrence_key] = occurrence + 1
         file_result, hint_source, hint_language = _candidate_source(result, hint, occurrence, source_path, language)
-        dedupe_key: tuple[str, int, int] | None = None
+        dedupe_key: tuple[str, int, int, str] | None = None
         if str(hint_language).lower() == "python":
             if hint_source not in definition_indexes:
                 definition_indexes[hint_source] = _python_definition_index(_read_source(hint_source))
@@ -911,7 +911,10 @@ def build_migration_execution(
             if index_entry is not None:
                 span = _resolve_python_definition_span(function_name, index_entry[0], index_entry[1])
                 if span is not None:
-                    dedupe_key = (hint_source, span[0], span[1])
+                    # The canonical skeleton is part of the merge condition:
+                    # hints resolving to the same span but carrying different
+                    # skeletons are distinct review evidence and stay separate.
+                    dedupe_key = (hint_source, span[0], span[1], str(hint.get("skeleton") or ""))
         hint_records.append(
             {
                 "hint_index": hint_index,
@@ -929,7 +932,7 @@ def build_migration_execution(
     # first hint; absorbed hints contribute their reason text to the
     # representative's selection reason so no review signal is lost. Position
     # keys are indexes into ``hint_records``.
-    groups: dict[tuple[str, int, int], list[int]] = {}
+    groups: dict[tuple[str, int, int, str], list[int]] = {}
     for position, record in enumerate(hint_records):
         key = record["dedupe_key"]
         if key is not None:
