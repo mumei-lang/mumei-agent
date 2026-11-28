@@ -275,6 +275,37 @@ def _verification_tool_failure_without_evidence(result: dict[str, object]) -> bo
     return not (has_report_counterexample or has_failed_atoms or has_failure_status)
 
 
+def _top_level_counterexample_is_embedded(result: dict[str, object]) -> bool:
+    """True only when the exact safety finding already carries this counterexample.
+
+    The standalone ``Z3 Counter-example`` row is a fail-visible fallback for
+    unstructured evidence.  Foreign safety findings already include the same
+    assignments and function name, so re-emitting that exact payload as a
+    second row creates finding/annotation/baseline cardinality noise.  Keep
+    the fallback unless all identity parts match exactly.
+    """
+    counterexample = result.get("counterexample")
+    if not isinstance(counterexample, dict) or not counterexample:
+        return False
+    function_name = _string_value(result.get("function_name"), "")
+    if not function_name:
+        return False
+    formatted = format_counterexample({"counterexample": counterexample})
+    prefix = "Z3 Counter-example: "
+    if not formatted.startswith(prefix):
+        return False
+    assignments = formatted[len(prefix) :]
+    if not assignments:
+        return False
+    function_marker = f"`{function_name}`"
+    counterexample_marker = f"counterexample: {assignments}"
+    return any(
+        function_marker in error
+        and (f"{counterexample_marker})" in error or error.endswith(counterexample_marker))
+        for error in _string_list(result.get("errors"))
+    )
+
+
 def _verification_issue_strings(result: dict[str, object]) -> list[str]:
     issues: list[str] = []
     verification = _dict_value(result.get("verification"))
@@ -299,7 +330,7 @@ def _verification_issue_strings(result: dict[str, object]) -> list[str]:
             continue
         issues.append(item)
     top_level_counterexample = format_counterexample(result)
-    if top_level_counterexample:
+    if top_level_counterexample and not _top_level_counterexample_is_embedded(result):
         issues.append(top_level_counterexample)
     if report_counterexample:
         issues.append(report_counterexample)

@@ -5604,3 +5604,121 @@ def test_audit_pipeline_classifies_verifier_crash_as_operational_error(tmp_path:
     assert result.verification_violations == []
     assert result.errors == ["mumei verify did not produce a verification report"]
     assert result.success is False
+
+
+def _embedded_counterexample_result(**overrides):
+    result = {
+        "success": False,
+        "function_name": "f",
+        "counterexample": {"y": 0},
+        "errors": [
+            "Python function `f` can divide by `y` without a non-zero contract (Z3 counterexample: y=0)"
+        ],
+        "verification": {"success": True, "report": {"status": "verified"}},
+    }
+    result.update(overrides)
+    return result
+
+
+def test_verification_issue_strings_suppresses_exact_embedded_counterexample() -> None:
+    issues = _verification_issue_strings(_embedded_counterexample_result())
+
+    assert issues == [
+        "Python function `f` can divide by `y` without a non-zero contract (Z3 counterexample: y=0)"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("override", "reason"),
+    [
+        ({"errors": []}, "top-level-only fallback remains"),
+        ({"counterexample": {"y": 1}}, "different assignment remains"),
+        (
+            {
+                "errors": [
+                    "Python function `f` can index `xs[y]` without a bounds contract (Z3 counterexample: y=0, len_xs=0)"
+                ]
+            },
+            "assignment prefix remains",
+        ),
+        ({"function_name": "g"}, "different function remains"),
+        ({"function_name": ""}, "unknown function remains"),
+        ({"errors": ["body-port: f: status=refuted counterexample {'y': 0}"]}, "body-port row remains"),
+        ({"errors": ["native-replay: f: status=refuted counterexample {'y': 0}"]}, "native replay row remains"),
+        ({"counterexample": {"y": 0}, "errors": ["Python function `f` can divide by `y` without a non-zero contract"]}, "partial detailed row remains"),
+        ({"function_name": 0}, "malformed function name remains"),
+    ],
+)
+def test_verification_issue_strings_keeps_non_exact_counterexample(override, reason) -> None:
+    result = _embedded_counterexample_result(**override)
+    issues = _verification_issue_strings(result)
+
+    assert any(issue.startswith("Z3 Counter-example:") for issue in issues), reason
+
+
+def test_verification_issue_strings_keeps_nested_report_counterexample_row() -> None:
+    result = _embedded_counterexample_result(
+        verification={
+            "success": False,
+            "report": {"status": "failed", "failed": ["f"], "counterexample": {"x": 0}},
+        }
+    )
+
+    issues = _verification_issue_strings(result)
+
+    assert "Z3 Counter-example: y=0" not in issues
+    assert "Z3 Counter-example: x=0" in issues
+
+
+def test_counterexample_projection_and_body_port_rows_are_not_suppressed() -> None:
+    result = _embedded_counterexample_result()
+    from agent.audit_reporting import _counterexample_value_dicts
+
+    values = _counterexample_value_dicts(result)
+    issues = _verification_issue_strings(result)
+    body_port_row = "body-port: f: status=refuted counterexample {'y': 0}"
+    native_row = "native-replay: f: status=refuted counterexample {'y': 0}"
+
+    assert values == [{"function_name": "f", "counterexample": {"y": 0}}]
+    assert body_port_row not in issues and native_row not in issues
+    combined = AuditResult(
+        success=False,
+        source_file="src/probe.py",
+        language="python",
+        spec_extracted=True,
+        verification_status="refuted",
+        verification_violations=[*issues, body_port_row, native_row],
+        counterexample_values=values,
+    )
+    from agent.audit_reporting import _finalize_audit_result
+
+    _finalize_audit_result(combined)
+
+    messages = [row["message"] for row in combined.findings]
+    assert body_port_row in messages
+    assert native_row in messages
+    assert not any(message == "Z3 Counter-example: y=0" for message in messages)
+    assert sum(row["category"] == "code" for row in combined.findings) == 3
+
+
+def test_redundant_counterexample_suppression_reduces_projection_cardinality() -> None:
+    violations = _verification_issue_strings(_embedded_counterexample_result())
+    result = AuditResult(
+        success=False,
+        source_file="src/probe.py",
+        language="python",
+        spec_extracted=True,
+        verification_status="refuted",
+        verification_violations=violations,
+        counterexample_values=[{"function_name": "f", "counterexample": {"y": 0}}],
+    )
+    from agent.audit_reporting import _finalize_audit_result
+    from agent.audit_sarif import sarif_document
+
+    _finalize_audit_result(result)
+    sarif = sarif_document(result)
+
+    assert len(result.verification_violations) == 1
+    assert len(result.findings) == 1
+    assert len({row["fingerprint"] for row in result.findings}) == 1
+    assert len(sarif["runs"][0]["results"]) == 1
