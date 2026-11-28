@@ -9494,6 +9494,7 @@ class Second:
         if "timing" in issue.message.lower() and "credential" in issue.message.lower()
     ]
     assert len(issues) == 2
+    assert {issue.function_name for issue in issues} == {"First.token_matches", "Second.token_matches"}
     assert len({issue.message for issue in issues}) == 2
 
 

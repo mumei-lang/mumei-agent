@@ -934,6 +934,11 @@ def _python_timing_credential_issues(source: str) -> list[ForeignSafetyIssue]:
         tree = ast.parse(source)
     except SyntaxError:
         return []
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
     issues: list[ForeignSafetyIssue] = []
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -941,13 +946,21 @@ def _python_timing_credential_issues(source: str) -> list[ForeignSafetyIssue]:
         if not _is_hardcoded_secret_name(node.name):
             continue
         loop = _python_early_exit_compare_loop(node)
-        if loop is not None:
-            issues.append(ForeignSafetyIssue(
-                function_name=node.name,
-                message=(f"Python function `{node.name}` uses early-exit credential comparison "
-                         f"at line {loop.lineno} that may expose a timing side channel"),
-                line=loop.lineno,
-            ))
+        if loop is None:
+            continue
+        class_names = []
+        cursor = node
+        while cursor in parents:
+            cursor = parents[cursor]
+            if isinstance(cursor, ast.ClassDef):
+                class_names.append(cursor.name)
+        display_name = ".".join([*reversed(class_names), node.name])
+        issues.append(ForeignSafetyIssue(
+            function_name=display_name,
+            message=(f"Python function `{display_name}` uses early-exit credential comparison "
+                     "that may expose a timing side channel"),
+            line=loop.lineno,
+        ))
     return issues
 
 
