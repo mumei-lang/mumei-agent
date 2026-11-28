@@ -8674,8 +8674,15 @@ fn f(total: i64, xs: &[i64], config: Config) -> i64 {
 """
     assert not [i for i in _detect_safety_issues(exiting_branch_reborrow, "rust") if "divide" in i.message]
     assert [i for i in _detect_safety_issues(parenthesized_reborrow, "rust") if "divide" in i.message]
+    if_let_shadow = """fn f(amount: i64, xs: &[i64], opt: Option<&[i64]>) -> i64 {
+    if xs.is_empty() { return 0 }
+    if let Some(xs) = opt { return amount / xs.len() as i64 }
+    0
+}
+"""
     assert not [i for i in _detect_safety_issues(closed_scope_shadow, "rust") if "divide" in i.message]
     assert [i for i in _detect_safety_issues(active_scope_shadow, "rust") if "divide" in i.message]
+    assert [i for i in _detect_safety_issues(if_let_shadow, "rust") if "divide" in i.message]
 
 
 def test_rust_arbitrary_member_divisor_remains_conservative() -> None:

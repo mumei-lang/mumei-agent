@@ -2073,7 +2073,12 @@ def _rust_collection_len_division_issues(
                 for child in pattern.named_children
                 if child.type == "shorthand_field_identifier"
             }
-        names: set[str] = set()
+        if pattern.type == "tuple_struct_pattern":
+            names: set[str] = set()
+            for child in pattern.named_children[1:]:
+                names.update(pattern_binding_identifiers(child))
+            return names
+        names = set()
         for child in pattern.named_children:
             if child.type in {"type_identifier", "field_identifier"}:
                 continue
@@ -2103,6 +2108,20 @@ def _rust_collection_len_division_issues(
             if scope is not None:
                 for name in pattern_binding_identifiers(node.child_by_field_name("pattern")):
                     record_binding(name, scope.start_byte, scope)
+        elif node.type in {"if_expression", "while_expression"}:
+            condition = node.child_by_field_name("condition")
+            scope = (
+                node.child_by_field_name("consequence")
+                if node.type == "if_expression"
+                else node.child_by_field_name("body")
+            )
+            if (
+                condition is not None
+                and condition.type == "let_condition"
+                and scope is not None
+            ):
+                for name in pattern_binding_identifiers(condition.child_by_field_name("pattern")):
+                    record_binding(name, scope.start_byte, scope)
         elif node.type == "closure_expression":
             scope = node.child_by_field_name("body")
             parameters = node.child_by_field_name("parameters")
@@ -2110,6 +2129,12 @@ def _rust_collection_len_division_issues(
                 for parameter in parameters.named_children:
                     for name in pattern_binding_identifiers(parameter):
                         record_binding(name, scope.start_byte, scope)
+        elif node.type == "match_arm":
+            scope = node.child_by_field_name("value")
+            pattern = node.child_by_field_name("pattern")
+            if scope is not None and pattern is not None:
+                for name in pattern_binding_identifiers(pattern):
+                    record_binding(name, scope.start_byte, scope)
         for child in node.named_children:
             collect_binding_scopes(child)
 
@@ -2306,6 +2331,8 @@ def _rust_collection_len_division_issues(
     seen: set[tuple[str, int]] = set()
 
     def visit(node) -> None:
+        if node is not block and node.type == "function_item":
+            return
         if node.type == "binary_expression":
             operator = node.child_by_field_name("operator")
             if operator is not None and text(operator) in {"/", "%"}:
