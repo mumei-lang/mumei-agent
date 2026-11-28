@@ -12,6 +12,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 ACTION_PATH = ROOT / ".github" / "actions" / "mumei-audit" / "action.yml"
 SUMMARY_SCRIPT = ROOT / ".github" / "actions" / "mumei-audit" / "scripts" / "summarize_audit.py"
+ANNOTATE_SCRIPT = ROOT / ".github" / "actions" / "mumei-audit" / "scripts" / "annotate_audit.py"
 VERIFY_ARTIFACT_SCRIPT = ROOT / ".github" / "actions" / "mumei-audit" / "scripts" / "verify_audit_evidence_artifact.py"
 SELFTEST_PATH = ROOT / ".github" / "workflows" / "mumei-audit-selftest.yml"
 
@@ -1430,3 +1431,113 @@ def test_summarize_audit_display_unchanged_without_workspace_env(tmp_path: Path)
         extra_env=env,
     )
     assert "/some/absolute/path/report.json" in text
+
+
+def _run_annotate(tmp_path: Path, audit: dict, extra_env: dict | None = None) -> str:
+    audit_json = tmp_path / "audit.json"
+    audit_json.write_text(json.dumps(audit), encoding="utf-8")
+    env = {**os.environ, "GITHUB_WORKSPACE": "", **(extra_env or {})}
+    result = subprocess.run(
+        [sys.executable, str(ANNOTATE_SCRIPT), "--audit-json", str(audit_json)],
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
+
+
+def _annotation_finding(message: str, baseline: str | None = "new", **overrides: object) -> dict:
+    row = {
+        "message": message,
+        "source_file": "src/payment_ledger.py",
+        "line": 12,
+    }
+    if baseline is not None:
+        row["baseline"] = baseline
+    row.update(overrides)
+    return row
+
+
+def test_annotate_audit_suppressed_findings_emit_no_annotations(tmp_path: Path) -> None:
+    out = _run_annotate(
+        tmp_path,
+        {"findings": [_annotation_finding("suppressed one", "suppressed"), _annotation_finding("suppressed two", "suppressed")]},
+    )
+    assert "::notice" not in out
+    assert out.strip() == ""
+
+
+def test_annotate_audit_missing_baseline_key_treated_as_active(tmp_path: Path) -> None:
+    out = _run_annotate(
+        tmp_path,
+        {"findings": [_annotation_finding("legacy finding", None)]},
+    )
+    assert "::notice file=src/payment_ledger.py,line=12::legacy finding" in out
+
+
+def test_annotate_audit_workspace_absolute_path_becomes_relative(tmp_path: Path) -> None:
+    workspace = "/home/runner/work/mumei-demo/mumei-demo"
+    row = _annotation_finding("runner path finding", source_file=f"{workspace}/src/payment_ledger.py")
+    out = _run_annotate(tmp_path, {"findings": [row]}, extra_env={"GITHUB_WORKSPACE": workspace})
+    assert "::notice file=src/payment_ledger.py,line=12::runner path finding" in out
+    assert "/home/runner/work" not in out
+
+
+def test_annotate_audit_outside_workspace_path_drops_file(tmp_path: Path) -> None:
+    row = _annotation_finding("outside finding", source_file="/opt/other/module.py")
+    out = _run_annotate(
+        tmp_path,
+        {"findings": [row]},
+        extra_env={"GITHUB_WORKSPACE": "/home/runner/work/mumei-demo/mumei-demo"},
+    )
+    assert "::notice::outside finding" in out
+    assert "file=" not in out
+    assert "/opt/other" not in out
+
+
+def test_annotate_audit_missing_or_invalid_source_file_drops_file(tmp_path: Path) -> None:
+    missing = _annotation_finding("no source")
+    del missing["source_file"]
+    none_row = _annotation_finding("none source", source_file=None)
+    traversal = _annotation_finding("traversal source", source_file="../../etc/passwd")
+    out = _run_annotate(tmp_path, {"findings": [missing, none_row, traversal]})
+    assert "::notice::no source" in out
+    assert "::notice::none source" in out
+    assert "::notice::traversal source" in out
+    assert "etc/passwd" not in out
+
+
+def test_annotate_audit_missing_line_emits_file_only(tmp_path: Path) -> None:
+    row = _annotation_finding("file only finding")
+    del row["line"]
+    out = _run_annotate(tmp_path, {"findings": [row]})
+    assert "::notice file=src/payment_ledger.py::file only finding" in out
+    assert "line=" not in out
+
+
+def test_annotate_audit_escapes_command_protocol_characters(tmp_path: Path) -> None:
+    row = _annotation_finding("multi\nline 100% certain\rvalue", source_file="src/weird:ty,po.py")
+    out = _run_annotate(tmp_path, {"findings": [row]})
+    assert "100%25 certain" in out
+    assert "%0A" in out
+    assert "%0D" in out
+    assert "\n" not in out.rstrip("\n").replace("%0A", "")
+    assert "file=src/weird%3Aty%2Cpo.py" in out
+    for line in out.strip().splitlines():
+        assert line.startswith("::notice")
+
+
+def test_annotate_audit_caps_annotations_with_remainder_notice(tmp_path: Path) -> None:
+    rows = [_annotation_finding(f"finding number {i}") for i in range(12)]
+    out = _run_annotate(tmp_path, {"findings": rows})
+    lines = [line for line in out.strip().splitlines() if line.startswith("::notice")]
+    assert len(lines) == 11
+    assert "finding number 9" in out
+    assert "finding number 10" not in out
+    assert "2 more active findings not annotated" in lines[-1]
+
+
+def test_annotate_audit_empty_findings_emits_nothing(tmp_path: Path) -> None:
+    assert _run_annotate(tmp_path, {"findings": []}).strip() == ""
+    assert _run_annotate(tmp_path, {}).strip() == ""

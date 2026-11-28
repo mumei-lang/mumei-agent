@@ -1,7 +1,8 @@
 name: Mumei audit
 description: >-
   Install mumei and mumei-agent dependencies, audit existing source code,
-  upload SARIF, optionally collect migration execution evidence, and write a GitHub Actions step summary.
+  upload SARIF, optionally collect migration execution evidence, write a GitHub Actions step summary,
+  and emit notice-level annotations for active findings as a review signal (not a proof or verification verdict).
 author: mumei-lang
 branding:
   icon: shield
@@ -327,6 +328,15 @@ runs:
           --timing-dir "$ACTION_STATE/timing" \
           --github-output "$GITHUB_OUTPUT" \
           --migration-status-json "$ACTION_STATE/migration-execution/status.json"
+
+    - name: Emit annotations for active findings
+      if: always()
+      shell: bash
+      run: |
+        if [ -f "$ACTION_STATE/audit.json" ]; then
+          python "${{ github.action_path }}/scripts/annotate_audit.py" \
+            --audit-json "$ACTION_STATE/audit.json"
+        fi
 
     - name: Upload audit evidence artifact
       if: always()
