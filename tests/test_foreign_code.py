@@ -9370,11 +9370,6 @@ func secretTokenTypeMatches(presented, stored string) bool {
         ("go", go, "tokenMatches"),
         ("go", go_with_comment, "tokenMatches"),
         ("go", go_independent_credential, "secretTokenTypeMatches"),
-        ("go", """package main
-func verifyTokenFromHeader(presented, stored string) bool {
-    return presented == stored
-}
-""", "verifyTokenFromHeader"),
         ("python", python, "token_matches"),
         ("python", python_independent_credential, "secret_token_type_matches"),
     ):
@@ -9434,6 +9429,11 @@ func apiKeyTypeMatches(presented, stored string) bool {
 """),
         ("go", """package main
 func tokenHeaderMatches(presented, stored string) bool {
+    return presented == stored
+}
+"""),
+        ("go", """package main
+func tokenEnvVarMatches(presented, stored string) bool {
     return presented == stored
 }
 """),
@@ -9500,6 +9500,12 @@ def can_read(doc, api_key, token):
     return True
 """),
         ("python", """def token_header_matches(provided, expected):
+    for a, b in zip(provided, expected):
+        if a != b:
+            return False
+    return True
+"""),
+        ("python", """def token_env_var_matches(provided, expected):
     for a, b in zip(provided, expected):
         if a != b:
             return False

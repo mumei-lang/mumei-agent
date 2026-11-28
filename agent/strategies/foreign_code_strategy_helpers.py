@@ -536,7 +536,15 @@ _CREDENTIAL_KEY_PAIRS = frozenset(
     }
 )
 _CREDENTIAL_METADATA_SUFFIXES = {
-    "header", "headername", "name", "env", "envvar", "variable", "param", "parameter",
+    "header",
+    "headername",
+    "name",
+    "env",
+    "envvar",
+    "variable",
+    "param",
+    "parameter",
+    "type",
 }
 _CREDENTIAL_NAME_PART = re.compile(
     r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+"
@@ -563,29 +571,23 @@ def _is_hardcoded_secret_name(name: str) -> bool:
 
 
 
-
-_TIMING_CREDENTIAL_METADATA_SUFFIXES = _CREDENTIAL_METADATA_SUFFIXES | {"type"}
-
-
 def _is_timing_credential_function_name(name: str) -> bool:
-    """Credential-purpose evidence for timing comparison, excluding type metadata."""
+    """Credential-purpose evidence for timing comparison, excluding metadata bindings."""
+    if not _is_hardcoded_secret_name(name):
+        return False
     words = _credential_name_words(name)
-    def credential_context(index: int, end: int) -> bool:
-        following = words[end:]
-        return (
-            (not following or following[0] not in {"type", "header", "headername"})
-            and "name" not in following
-        )
-
     single_word_hit = any(
-        word in _CREDENTIAL_WORDS and credential_context(index, index + 1)
+        word in _CREDENTIAL_WORDS
+        and (index + 1 >= len(words) or words[index + 1] not in _CREDENTIAL_METADATA_SUFFIXES)
         for index, word in enumerate(words)
     )
     key_pair_hit = any(
-        pair in _CREDENTIAL_KEY_PAIRS and credential_context(index, index + 2)
+        pair in _CREDENTIAL_KEY_PAIRS
+        and (index + 2 >= len(words) or words[index + 2] not in _CREDENTIAL_METADATA_SUFFIXES)
         for index, pair in enumerate(zip(words, words[1:]))
     )
     return single_word_hit or key_pair_hit
+
 
 def _is_placeholder_secret_value(value: str) -> bool:
     stripped = value.strip()
