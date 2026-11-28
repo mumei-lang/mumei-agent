@@ -969,17 +969,27 @@ def test_verify_downloaded_action_artifact_zero_mode_rejects_review_or_missing_s
 
 
 def test_verify_downloaded_action_artifact_zero_mode_rejects_inconsistent_zero_counts(tmp_path: Path) -> None:
-    artifact = tmp_path / "evidence"
-    _write_zero_candidate_downloaded_action_artifact(artifact)
-    execution_path = artifact / "migration-execution" / "migration_execution.json"
-    execution = json.loads(execution_path.read_text(encoding="utf-8"))
-    execution["summary"]["blocked"] = 1
-    execution_path.write_text(json.dumps(execution), encoding="utf-8")
+    mutations = (
+        (lambda execution, status: execution["summary"].update({"blocked": 1}), "summary counts are inconsistent"),
+        (lambda execution, status: status["counts"].update({"blocked": 1}), "status counts are inconsistent"),
+        (lambda execution, status: execution["summary"].update({"candidate_count": 1}), "candidate count is inconsistent"),
+        (lambda execution, status: status.update({"ready_count": 1}), "ready count is inconsistent"),
+    )
+    for index, (mutate, expected) in enumerate(mutations):
+        artifact = tmp_path / f"evidence-{index}"
+        _write_zero_candidate_downloaded_action_artifact(artifact)
+        execution_path = artifact / "migration-execution" / "migration_execution.json"
+        status_path = artifact / "migration-execution" / "status.json"
+        execution = json.loads(execution_path.read_text(encoding="utf-8"))
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        mutate(execution, status)
+        execution_path.write_text(json.dumps(execution), encoding="utf-8")
+        status_path.write_text(json.dumps(status), encoding="utf-8")
 
-    completed = _run_downloaded_artifact_verifier(artifact, "--allow-zero-candidates")
+        completed = _run_downloaded_artifact_verifier(artifact, "--allow-zero-candidates")
 
-    assert completed.returncode != 0
-    assert "summary counts are inconsistent" in completed.stderr
+        assert completed.returncode != 0
+        assert expected in completed.stderr
 
 
 def test_verify_downloaded_action_artifact_zero_mode_still_validates_candidate_claims(tmp_path: Path) -> None:
