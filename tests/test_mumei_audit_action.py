@@ -99,6 +99,8 @@ def test_selftest_workflow_exercises_small_repo_and_publishes_timing() -> None:
     verify_text = verify_step["run"]
     assert "verify_audit_evidence_artifact.py evidence" in verify_text
     assert "--require-hidden-companion" in verify_text
+    assert "--require-blocked-candidate" in verify_text
+    assert "--require-generated-mm" in verify_text
     assert "--forbidden-literal fake-password-value" in verify_text
     assert "if" not in verify_step
     assert "--fail-on high-confidence" in audit_args
@@ -835,7 +837,14 @@ def test_verify_downloaded_action_artifact_accepts_blocked_review_success_path(t
     artifact = tmp_path / "evidence"
     _write_downloaded_action_artifact(artifact)
 
-    completed = _run_downloaded_artifact_verifier(artifact, "--require-hidden-companion", "--forbidden-literal", "fake-password-value")
+    completed = _run_downloaded_artifact_verifier(
+        artifact,
+        "--require-hidden-companion",
+        "--require-blocked-candidate",
+        "--require-generated-mm",
+        "--forbidden-literal",
+        "fake-password-value",
+    )
 
     assert completed.returncode == 0, completed.stderr
     assert "generated companion files verified: 5" in completed.stdout
@@ -852,6 +861,40 @@ def test_verify_downloaded_action_artifact_accepts_ready_review_success_path(tmp
 
     assert completed.returncode == 0, completed.stderr
     assert "migration execution candidates verified: 1" in completed.stdout
+
+
+def test_verify_downloaded_action_artifact_requires_blocked_candidate_only_when_requested(tmp_path: Path) -> None:
+    artifact = tmp_path / "evidence"
+    _write_downloaded_action_artifact(artifact, state="ready_for_human_review")
+
+    completed = _run_downloaded_artifact_verifier(artifact, "--require-blocked-candidate")
+
+    assert completed.returncode != 0
+    assert "does not exercise the blocked review path" in completed.stderr
+
+
+def test_verify_downloaded_action_artifact_accepts_generation_suppressed_blocked_candidate(tmp_path: Path) -> None:
+    artifact = tmp_path / "evidence"
+    _write_downloaded_action_artifact(artifact)
+    generated = artifact / "migration-execution" / "generated-artifacts"
+    for name in ("divide.mm", "divide.proof.json", "divide.sarif"):
+        (generated / name).unlink()
+    execution_path = artifact / "migration-execution" / "migration_execution.json"
+    execution = json.loads(execution_path.read_text(encoding="utf-8"))
+    execution["candidates"][0]["generated_mm"] = {}
+    execution["candidates"][0]["verification"] = {}
+    execution_path.write_text(json.dumps(execution), encoding="utf-8")
+    status_path = artifact / "migration-execution" / "status.json"
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    status["generated_artifacts_copied"] = 2
+    status_path.write_text(json.dumps(status), encoding="utf-8")
+
+    completed = _run_downloaded_artifact_verifier(artifact)
+    assert completed.returncode == 0, completed.stderr
+
+    strict = _run_downloaded_artifact_verifier(artifact, "--require-generated-mm")
+    assert strict.returncode != 0
+    assert "no generated .mm companion claim" in strict.stderr
 
 
 def test_verify_downloaded_action_artifact_accepts_unwritten_proof_and_sarif_as_nonclaims(tmp_path: Path) -> None:

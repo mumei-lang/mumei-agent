@@ -143,7 +143,14 @@ def _validate_written_claim(
     return _validate_file_claim(claim, label=label, original_root_text=original_root_text, generated_root=generated_root)
 
 
-def verify_artifact(root: Path, *, require_hidden_companion: bool, forbidden_literal: str = "") -> dict[str, int]:
+def verify_artifact(
+    root: Path,
+    *,
+    require_hidden_companion: bool,
+    forbidden_literal: str = "",
+    require_blocked_candidate: bool = False,
+    require_generated_mm: bool = False,
+) -> dict[str, int]:
     if root.is_symlink() or not root.is_dir():
         raise ArtifactVerificationError("evidence artifact root is missing or is not a regular directory")
     root = root.resolve()
@@ -237,6 +244,8 @@ def verify_artifact(root: Path, *, require_hidden_companion: bool, forbidden_lit
         raise ArtifactVerificationError("successful action artifact contains candidate operational_error")
     if computed_counts["blocked"] + computed_counts["ready_for_human_review"] != len(candidates) or not candidates:
         raise ArtifactVerificationError("successful action artifact does not consist of blocked/ready review evidence")
+    if require_blocked_candidate and computed_counts["blocked"] == 0:
+        raise ArtifactVerificationError("fixed selftest artifact does not exercise the blocked review path")
 
     generated_value = artifact_paths.get("generated_artifacts")
     if not isinstance(generated_value, str):
@@ -291,7 +300,7 @@ def verify_artifact(root: Path, *, require_hidden_companion: bool, forbidden_lit
                 generated_root=generated_root,
             ):
                 validated_sarif += 1
-    if validated_mm == 0:
+    if require_generated_mm and validated_mm == 0:
         raise ArtifactVerificationError("no generated .mm companion claim was validated")
 
     print("audit report artifact verified: audit.json and audit.sarif")
@@ -316,6 +325,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("artifact_dir")
     parser.add_argument("--require-hidden-companion", action="store_true")
+    parser.add_argument("--require-blocked-candidate", action="store_true")
+    parser.add_argument("--require-generated-mm", action="store_true")
     parser.add_argument("--forbidden-literal", default="")
     args = parser.parse_args()
     try:
@@ -323,6 +334,8 @@ def main() -> int:
             Path(args.artifact_dir),
             require_hidden_companion=args.require_hidden_companion,
             forbidden_literal=args.forbidden_literal,
+            require_blocked_candidate=args.require_blocked_candidate,
+            require_generated_mm=args.require_generated_mm,
         )
     except ArtifactVerificationError as exc:
         raise SystemExit(f"audit evidence artifact verification failed: {exc}") from exc
