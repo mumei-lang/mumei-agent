@@ -139,6 +139,7 @@ def test_positive_runtime_off_is_explicitly_skipped(tmp_path, capsys):
             "os_stderr_observation",
         ],
     }
+    assert len(report["inputs"]["core_sha256"]) == 64
     assert "deep_acceptance_fold" in report["checks_not_performed"]
     assert "unified_verdict" in report["checks_not_performed"]
 

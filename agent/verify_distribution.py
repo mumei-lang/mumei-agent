@@ -415,6 +415,7 @@ def run_distribution(args: argparse.Namespace) -> dict:
         "schema_version": REPORT_SCHEMA,
         "scope": "native_first_distribution_role_orchestration",
         "inputs": {
+            "core_sha256": initial_inputs["core_sha256"],
             "bundle_record_sha256": initial_inputs["member_sha256"][RECORD_FILE],
             "source_sha256": initial_inputs["source_sha256"],
             "expected_build_id": args.expected_build_id,
