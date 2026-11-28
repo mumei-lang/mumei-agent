@@ -833,6 +833,40 @@ def _run_downloaded_artifact_verifier(root: Path, *args: str) -> subprocess.Comp
     )
 
 
+def _write_zero_candidate_downloaded_action_artifact(root: Path) -> None:
+    _write_downloaded_action_artifact(root)
+    execution_path = root / "migration-execution" / "migration_execution.json"
+    execution = json.loads(execution_path.read_text(encoding="utf-8"))
+    execution["candidates"] = []
+    execution["selection"] = {"requested_functions": [], "missing_requested_functions": []}
+    execution["summary"] = {
+        "ready_for_human_review": 0,
+        "blocked": 0,
+        "operational_error": 0,
+        "candidate_count": 0,
+        "review_required": False,
+    }
+    execution_path.write_text(json.dumps(execution), encoding="utf-8")
+
+    generated = root / "migration-execution" / "generated-artifacts"
+    for path in sorted(generated.rglob("*"), reverse=True):
+        if path.is_file() and path.name != ".mumei-generated-artifacts":
+            path.unlink()
+        elif path.is_dir():
+            try:
+                path.rmdir()
+            except OSError:
+                pass
+    copied = sum(1 for path in generated.rglob("*") if path.is_file())
+    status_path = root / "migration-execution" / "status.json"
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    status["ready_count"] = 0
+    status["counts"] = {"ready_for_human_review": 0, "blocked": 0, "operational_error": 0}
+    status["review_required"] = False
+    status["generated_artifacts_copied"] = copied
+    status_path.write_text(json.dumps(status), encoding="utf-8")
+
+
 def test_verify_downloaded_action_artifact_accepts_blocked_review_success_path(tmp_path: Path) -> None:
     artifact = tmp_path / "evidence"
     _write_downloaded_action_artifact(artifact)
@@ -861,6 +895,122 @@ def test_verify_downloaded_action_artifact_accepts_ready_review_success_path(tmp
 
     assert completed.returncode == 0, completed.stderr
     assert "migration execution candidates verified: 1" in completed.stdout
+
+
+def test_verify_downloaded_action_artifact_zero_candidates_legacy_default_fails(tmp_path: Path) -> None:
+    artifact = tmp_path / "evidence"
+    _write_zero_candidate_downloaded_action_artifact(artifact)
+
+    completed = _run_downloaded_artifact_verifier(artifact)
+
+    assert completed.returncode != 0
+    assert "must require human review" in completed.stderr
+
+    review_required = tmp_path / "evidence-review-required"
+    _write_zero_candidate_downloaded_action_artifact(review_required)
+    execution_path = review_required / "migration-execution" / "migration_execution.json"
+    status_path = review_required / "migration-execution" / "status.json"
+    execution = json.loads(execution_path.read_text(encoding="utf-8"))
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    execution["summary"]["review_required"] = True
+    status["review_required"] = True
+    execution_path.write_text(json.dumps(execution), encoding="utf-8")
+    status_path.write_text(json.dumps(status), encoding="utf-8")
+
+    rejected = _run_downloaded_artifact_verifier(review_required)
+
+    assert rejected.returncode != 0
+    assert "does not consist of blocked/ready review evidence" in rejected.stderr
+
+
+def test_verify_downloaded_action_artifact_accepts_explicit_zero_candidates(tmp_path: Path) -> None:
+    artifact = tmp_path / "evidence"
+    _write_zero_candidate_downloaded_action_artifact(artifact)
+
+    completed = _run_downloaded_artifact_verifier(
+        artifact,
+        "--allow-zero-candidates",
+        "--require-hidden-companion",
+        "--forbidden-literal",
+        "fake-password-value",
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "migration execution candidates verified: 0" in completed.stdout
+    assert "generated companion files verified: 1" in completed.stdout
+    assert "hidden generated companion files verified: 1" in completed.stdout
+    assert "generated companion claims verified: mm=0, proof=0, sarif=0" in completed.stdout
+    assert "zero migration candidates explicitly allowed; no generated-.mm acceptance evidence present" in completed.stdout
+    assert "not host semantic-equivalence proof" in completed.stdout
+
+
+def test_verify_downloaded_action_artifact_zero_mode_rejects_review_or_missing_selection(tmp_path: Path) -> None:
+    for index, (mutate, expected) in enumerate((
+        (lambda execution, status: execution["summary"].update({"review_required": True}), "unexpectedly requires review"),
+        (
+            lambda execution, status: execution["selection"]["missing_requested_functions"].append("split_cents"),
+            "missing requested functions",
+        ),
+    )):
+        artifact = tmp_path / f"evidence-{index}"
+        _write_zero_candidate_downloaded_action_artifact(artifact)
+        execution_path = artifact / "migration-execution" / "migration_execution.json"
+        status_path = artifact / "migration-execution" / "status.json"
+        execution = json.loads(execution_path.read_text(encoding="utf-8"))
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        mutate(execution, status)
+        execution_path.write_text(json.dumps(execution), encoding="utf-8")
+        status_path.write_text(json.dumps(status), encoding="utf-8")
+
+        completed = _run_downloaded_artifact_verifier(artifact, "--allow-zero-candidates")
+
+        assert completed.returncode != 0
+        assert expected in completed.stderr
+
+
+def test_verify_downloaded_action_artifact_zero_mode_rejects_inconsistent_zero_counts(tmp_path: Path) -> None:
+    artifact = tmp_path / "evidence"
+    _write_zero_candidate_downloaded_action_artifact(artifact)
+    execution_path = artifact / "migration-execution" / "migration_execution.json"
+    execution = json.loads(execution_path.read_text(encoding="utf-8"))
+    execution["summary"]["blocked"] = 1
+    execution_path.write_text(json.dumps(execution), encoding="utf-8")
+
+    completed = _run_downloaded_artifact_verifier(artifact, "--allow-zero-candidates")
+
+    assert completed.returncode != 0
+    assert "summary counts are inconsistent" in completed.stderr
+
+
+def test_verify_downloaded_action_artifact_zero_mode_still_validates_candidate_claims(tmp_path: Path) -> None:
+    artifact = tmp_path / "evidence"
+    _write_downloaded_action_artifact(artifact)
+
+    completed = _run_downloaded_artifact_verifier(artifact, "--allow-zero-candidates")
+
+    assert completed.returncode == 0, completed.stderr
+    assert "generated companion claims verified: mm=1, proof=1, sarif=1" in completed.stdout
+    assert "zero migration candidates explicitly allowed" not in completed.stdout
+
+    tampered = tmp_path / "evidence-tampered"
+    _write_downloaded_action_artifact(tampered)
+    (tampered / "migration-execution" / "generated-artifacts" / "divide.mm").write_text("tampered\n", encoding="utf-8")
+
+    rejected = _run_downloaded_artifact_verifier(tampered, "--allow-zero-candidates")
+
+    assert rejected.returncode != 0
+    assert "generated .mm sha256" in rejected.stderr
+
+
+def test_verify_downloaded_action_artifact_zero_mode_conflicts_with_positive_requirements(tmp_path: Path) -> None:
+    artifact = tmp_path / "evidence"
+    _write_zero_candidate_downloaded_action_artifact(artifact)
+
+    for flag in ("--require-blocked-candidate", "--require-generated-mm"):
+        completed = _run_downloaded_artifact_verifier(artifact, "--allow-zero-candidates", flag)
+
+        assert completed.returncode != 0
+        assert "cannot be combined" in completed.stderr
 
 
 def test_verify_downloaded_action_artifact_rejects_ready_candidate_without_generated_mm(tmp_path: Path) -> None:
