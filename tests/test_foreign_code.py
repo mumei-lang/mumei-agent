@@ -9623,3 +9623,68 @@ func tokenMatches(presented, stored string) bool {{
     assert secret not in captured.out
     assert secret not in captured.err
     assert not list(tmp_path.iterdir())
+
+
+def test_solidity_unchecked_call_positive_controls() -> None:
+    source = '''
+interface IERC20Like {
+    function transfer(address to, uint256 amount) external returns (bool);
+}
+contract Pool {
+    IERC20Like public rewardToken;
+    function payFee(uint256 fee) internal {
+        payable(feeRecipient).call{value: fee}("");
+    }
+    function getReward() public {
+        rewardToken.transfer(msg.sender, amount);
+    }
+}
+'''
+    issues = [i for i in _detect_solidity_contract_issues(source) if "discards" in i.message]
+    messages = {i.message for i in issues}
+    assert "Solidity function `payFee` discards the success flag of a low-level value call" in messages
+    assert "Solidity function `getReward` discards the boolean return of an ERC20-like token transfer" in messages
+    assert all(not i.counterexample for i in issues)
+
+
+def test_solidity_unchecked_call_negative_controls() -> None:
+    source = '''
+interface IERC20Like {
+    function transfer(address to, uint256 amount) external returns (bool);
+}
+contract Token { function transfer(address to, uint256 amount) external returns (bool) {} }
+contract Pool {
+    IERC20Like public rewardToken;
+    Token public token;
+    function payFee(uint256 fee) internal {
+        (bool ok, ) = payable(feeRecipient).call{value: fee}("");
+        require(ok);
+        noValue.call("");
+    }
+    function getReward() public {
+        require(rewardToken.transfer(msg.sender, amount));
+        bool ok2 = rewardToken.transfer(msg.sender, amount);
+        if (rewardToken.transfer(msg.sender, amount)) { revert(); }
+        token.transfer(msg.sender, amount);
+    }
+}
+'''
+    assert not [i for i in _detect_solidity_contract_issues(source) if "discards" in i.message]
+
+
+def test_solidity_unchecked_call_never_outputs_call_values(capsys) -> None:
+    sentinel = "unit-test-unchecked-call-sentinel"
+    source = f'''
+contract Pool {{
+    function payFee(uint256 fee) internal {{
+        payable(feeRecipient).call{{value: fee}}("{sentinel}");
+    }}
+}}
+'''
+    issues = [i for i in _detect_solidity_contract_issues(source) if "discards" in i.message]
+    captured = capsys.readouterr()
+    assert len(issues) == 1
+    assert sentinel not in issues[0].message
+    assert sentinel not in str(issues[0].counterexample)
+    assert sentinel not in captured.out
+    assert sentinel not in captured.err

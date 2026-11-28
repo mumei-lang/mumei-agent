@@ -267,3 +267,20 @@ def test_stable_source_key_distinguishes_nested_submodule_paths(tmp_path: Path, 
 
     assert _stable_source_key("specs/payment.mm") == "specs/payment.mm"
     assert _stable_source_key("vendor/lib/specs/payment.mm") == "vendor/lib/specs/payment.mm"
+
+
+def test_unchecked_call_findings_are_high_confidence() -> None:
+    result = _finalize(
+        success=False,
+        verification_status="unverifiable",
+        verification_violations=[
+            "Solidity function `payFee` discards the success flag of a low-level value call",
+            "Solidity function `getReward` discards the boolean return of an ERC20-like token transfer",
+            "checksum mismatch",
+        ],
+    )
+
+    rows = {row["message"]: row for row in result.findings}
+    assert rows["Solidity function `payFee` discards the success flag of a low-level value call"]["confidence"] == "high"
+    assert rows["Solidity function `getReward` discards the boolean return of an ERC20-like token transfer"]["confidence"] == "high"
+    assert rows["checksum mismatch"]["confidence"] == "medium"
