@@ -10330,6 +10330,20 @@ def make_share_token():
     (token, delay), status = (secrets.token_hex(16), random.random()), 200
     return token
 ''',
+        '''
+import random
+import secrets
+
+def make_share_token():
+    return {"session": {"token": secrets.token_hex(16), "session_retry_after": random.random()}}
+''',
+        '''
+import hashlib
+import random
+
+def make_share_token():
+    return hashlib.sha256(random.SystemRandom().randbytes(32) + str(random.random()).encode()).hexdigest()
+''',
     ]
     positive_sources = [
         '''

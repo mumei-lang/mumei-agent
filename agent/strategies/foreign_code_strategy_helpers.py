@@ -1072,10 +1072,20 @@ def _python_ast_contains(root: ast.AST | None, needle: ast.AST) -> bool:
     return root is not None and any(node is needle for node in ast.walk(root))
 
 
+def _python_contains_system_random(value: ast.AST) -> bool:
+    return any(
+        isinstance(node, ast.Attribute)
+        and node.attr == "SystemRandom"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "random"
+        for node in ast.walk(value)
+    )
+
+
 def _python_weak_random_only_expression(value: ast.AST | None, random_call: ast.AST) -> bool:
     if value is None or isinstance(value, (ast.Tuple, ast.List, ast.Set, ast.Dict)):
         return False
-    if not _python_ast_contains(value, random_call):
+    if not _python_ast_contains(value, random_call) or _python_contains_system_random(value):
         return False
     # Precision-first shallow witness: local variables such as scale factors are
     # intentional false negatives rather than scope/dataflow inference.
@@ -1088,10 +1098,12 @@ def _python_weak_random_only_expression(value: ast.AST | None, random_call: ast.
 
 def _python_dict_credential_context(value: ast.Dict, random_call: ast.AST) -> bool:
     for key, item in zip(value.keys, value.values, strict=True):
+        key_parts = set(_name_parts(key.value)) if isinstance(key, ast.Constant) and isinstance(key.value, str) else set()
         if not (
             isinstance(key, ast.Constant)
             and isinstance(key.value, str)
             and _has_strong_credential_name(key.value)
+            and not key_parts.intersection({"retry", "jitter", "delay"})
         ):
             continue
         if _python_weak_random_only_expression(item, random_call):
