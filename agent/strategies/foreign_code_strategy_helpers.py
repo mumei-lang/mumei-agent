@@ -9907,7 +9907,144 @@ def _cast_and_subtraction_issues(
             local_names=local_names,
         )
     )
+    if label == "Solidity" and subtraction_regions:
+        # The operand-specific underflow witness is strictly stronger evidence
+        # for the same unchecked spans, so the generic arithmetic witness is
+        # skipped when one already fired (precision over recall).
+        if not any("can underflow" in issue.message for issue in issues):
+            issues.extend(
+                _solidity_unchecked_arithmetic_issues(function_name, text, subtraction_regions)
+            )
     return issues
+
+
+# Arithmetic operators whose wrapping inside a Solidity ≥0.8 ``unchecked { }``
+# region is silent rather than reverting. ``++``/``--`` are excluded: the
+# ``unchecked { ++i; }`` loop-increment idiom is ubiquitous legitimate gas
+# optimization, so flagging it would bury the witness in false positives.
+# Bit operations, comparisons, and division are out of scope — division
+# reverts on zero even inside ``unchecked``.
+_UNCHECKED_COMPOUND_ARITH_RE = re.compile(r"(?P<op>[-+*])=")
+_UNCHECKED_BINARY_ARITH_RE = re.compile(r"(?<=[\w\)\]])\s*(?P<op>[+\-*])\s*(?=[\w\(])")
+_UNCHECKED_INC_DEC_RE = re.compile(r"\+\+|--")
+
+
+def _simple_arith_operands(
+    segment: str, op_pos: int, op_end: int
+) -> tuple[str | None, str | None]:
+    """Plain-identifier operands around an arithmetic operator, or ``None``
+    for anything more complex (member access, index/call expressions) — only
+    plain identifiers can be matched against direct bounds guards."""
+    before = segment[:op_pos]
+    left: str | None = None
+    left_match = re.search(r"([A-Za-z_]\w*)\s*$", before)
+    if left_match is not None:
+        ident_start = left_match.start(1)
+        if ident_start == 0 or before[ident_start - 1] not in ".]":
+            left = left_match.group(1)
+    right: str | None = None
+    right_match = re.match(r"\s*([A-Za-z_]\w*)", segment[op_end:])
+    if right_match is not None:
+        tail = segment[op_end + right_match.end(1) :]
+        if not tail.startswith(("[", ".", "(")):
+            right = right_match.group(1)
+    return left, right
+
+
+def _unchecked_addition_guarded(text: str, left: str, right: str, pos: int) -> bool:
+    """Whether ``left + right`` at ``pos`` is guarded by a direct overflow
+    comparison — exactly ``x <= type(uintN).max - y`` (or its mirror
+    ``type(uintN).max - y >= x``) in either operand order — whose dominance
+    is confirmed by the same ``_guard_mechanism`` machinery as subtraction.
+    A ``require`` in a non-dominating sibling branch does not suppress."""
+    maxexpr = r"type\s*\(\s*uint\d*\s*\)\s*\.\s*max"
+    for x, y in ((left, right), (right, left)):
+        xb, yb = re.escape(x), re.escape(y)
+        shapes = (
+            rf"\b{xb}\s*<=?\s*{maxexpr}\s*-\s*{yb}\b"
+            rf"|{maxexpr}\s*-\s*{yb}\s*>?=?\s*{xb}\b"
+        )
+        for match in re.finditer(shapes, text):
+            if match.end() > pos:
+                break
+            mechanism = _guard_mechanism(text, match, pos)
+            if mechanism not in _GUARD_HOLDS_MECHANISMS:
+                continue
+            if mechanism == "asserted" and not _require_dominates_use(
+                text, match.start(), pos
+            ):
+                continue
+            return True
+    return False
+
+
+def _require_dominates_use(text: str, comparison_pos: int, use_pos: int) -> bool:
+    """Shallow control-depth dominance for the ``require``/``assert`` enclosing
+    a comparison: ``if (ok) { require(...) }`` does not dominate a later use
+    because the depth drops below the require's depth when the branch closes,
+    while a top-level require does. Same approximation direction as the
+    split-index guard dominance work — suppression must be justified."""
+    require_pos = -1
+    for keyword in re.finditer(r"\b(?:require|assert)\s*\(", text[:comparison_pos]):
+        require_pos = keyword.start()
+    if require_pos < 0:
+        return False
+    depths = _control_depths(text)
+    require_depth = depths[require_pos]
+    return min(depths[require_pos : use_pos + 1]) >= require_depth
+
+
+def _solidity_unchecked_arithmetic_issues(
+    function_name: str,
+    text: str,
+    regions: list[tuple[int, int]],
+) -> list[ForeignSafetyIssue]:
+    """Flag the first unguarded arithmetic operation inside any ``unchecked``
+    span.
+
+    Precision rationale: this is a medium-confidence review witness, not a
+    proof of a missing invariant — ``unchecked`` arithmetic is sometimes a
+    deliberate, correct optimization, so the message only says the arithmetic
+    relies on a bounds invariant that is not machine-checked. Operations whose
+    plain-identifier operands are directly bounds-guarded (``require`` /
+    early-exit / ternary dominance via ``_subtraction_guarded``, or the
+    idiomatic ``type(uintN).max`` overflow require for addition) are
+    suppressed; anything more complex stays reportable because suppression
+    must be justified, never assumed — same conservative direction as the
+    split-index guard dominance work. One finding per function keeps noise
+    bounded; ``text`` is the position-preserving literal/comment-stripped
+    body so span positions line up with ``regions``.
+    """
+    for start, end in regions:
+        segment = _UNCHECKED_INC_DEC_RE.sub("  ", text[start:end])
+        candidates: list[tuple[int, int, str]] = []
+        for match in _UNCHECKED_COMPOUND_ARITH_RE.finditer(segment):
+            candidates.append((match.start("op"), match.end(), match.group("op")))
+        for match in _UNCHECKED_BINARY_ARITH_RE.finditer(segment):
+            op_pos = match.start("op")
+            if any(abs(op_pos - pos) <= 1 for pos, _, _ in candidates):
+                continue
+            candidates.append((op_pos, match.end(), match.group("op")))
+        for op_pos, op_end, op_char in sorted(candidates):
+            left, right = _simple_arith_operands(segment, op_pos, op_end)
+            abs_pos = start + op_pos
+            if left is not None and right is not None:
+                if op_char == "-" and _subtraction_guarded(text, left, right, abs_pos):
+                    continue
+                if op_char == "+" and _unchecked_addition_guarded(text, left, right, abs_pos):
+                    continue
+            return [
+                ForeignSafetyIssue(
+                    function_name=function_name,
+                    message=(
+                        f"Solidity function `{function_name}` performs arithmetic "
+                        "inside an `unchecked` block that relies on an unchecked "
+                        "arithmetic bounds invariant"
+                    ),
+                    confidence="medium",
+                )
+            ]
+    return []
 
 
 def _unsigned_subtraction_issues(
