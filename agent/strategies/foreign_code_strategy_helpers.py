@@ -2012,7 +2012,31 @@ def _text_len_exit_guard_limit(
         if use_pos < after_guard:
             continue
         guard_depth = depths[match.start()]
-        if min(depths[after_guard : use_pos + 1]) >= guard_depth:
+        if min(depths[after_guard : use_pos + 1]) < guard_depth:
+            continue
+        # A case/default label or match arm boundary at or above the guard's
+        # depth is a sibling branch, not a dominated continuation.
+        if _sibling_branch_boundary(body, after_guard, use_pos, guard_depth, depths, language):
+            continue
+        return True
+    return False
+
+
+def _sibling_branch_boundary(
+    body: str,
+    start: int,
+    end: int,
+    guard_depth: int,
+    depths: list[int],
+    language: str,
+) -> bool:
+    segment = body[start:end]
+    if language == "go":
+        boundary = re.compile(r"(?m)^[ \t]*(?:case\b|default[ \t]*:)")
+    else:
+        boundary = re.compile(r"=>")
+    for hit in boundary.finditer(segment):
+        if depths[start + hit.start()] <= guard_depth:
             return True
     return False
 
