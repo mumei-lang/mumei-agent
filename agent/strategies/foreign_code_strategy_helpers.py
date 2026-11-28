@@ -1611,6 +1611,98 @@ def _is_go_test_helper(source: str) -> bool:
     return bool(re.search(r"^\s*func\s+\w+\s*\(\s*t\s+\*?testing\.(?:T|TB)\b", source, re.MULTILINE))
 
 
+def _go_pointer_valued_map_names(source: str) -> set[str]:
+    names: set[str] = set()
+    patterns = (
+        r"^\s*var\s+(\w+)\s*=\s*map\[[^\]]+\]\s*\*\w+",
+        r"^\s*var\s+(\w+)\s+map\[[^\]]+\]\s*\*\w+",
+        r"^\s*(\w+)\s+map\[[^\]]+\]\s*\*\w+",
+    )
+    for pattern in patterns:
+        names.update(match.group(1) for match in re.finditer(pattern, source, re.MULTILINE))
+    return names
+
+
+def _go_struct_pointer_fields(source: str) -> dict[str, set[str]]:
+    fields: dict[str, set[str]] = {}
+    for match in re.finditer(r"\btype\s+(\w+)\s+struct\s*\{(.*?)\}", source, re.DOTALL):
+        type_name, body = match.groups()
+        fields[type_name] = {
+            field.group(1)
+            for field in re.finditer(r"^\s*(\w+)\s+\*[\w.]+\b", body, re.MULTILINE)
+        }
+    return fields
+
+
+def _go_guarded_or_reassigned_before(prefix: str, name: str) -> bool:
+    if re.search(rf"\b{re.escape(name)}\s*(?:==|!=)\s*nil\b|\bnil\s*(?:==|!=)\s*{re.escape(name)}\b", prefix):
+        return True
+    return re.search(rf"(?m)^\s*{re.escape(name)}\s*(?:=|:=)", prefix) is not None
+
+
+def _go_shallow_null_dereference_issues(
+    function_name: str,
+    body: str,
+    params_text: str,
+    package_source: str,
+    receiver_name: str | None = None,
+) -> list[ForeignSafetyIssue]:
+    """Shallow witness for visible pointer map lookups and pointer-field chains."""
+    issues: list[ForeignSafetyIssue] = []
+    pointer_maps = sorted(_go_pointer_valued_map_names(package_source))
+    if pointer_maps:
+        map_names = "|".join(re.escape(name) for name in pointer_maps)
+        lookup = re.compile(rf"\b(\w+)\s*:=\s*(?:{map_names})\s*\[[^\n;\]]+\]")
+        for match in lookup.finditer(body):
+            name = match.group(1)
+            rest = body[match.end():]
+            access = re.search(rf"\b{re.escape(name)}\s*\.|\*\s*{re.escape(name)}\b", rest)
+            if access is None:
+                continue
+            if _go_guarded_or_reassigned_before(rest[:access.start()], name):
+                continue
+            issues.append(ForeignSafetyIssue(
+                function_name=function_name,
+                message=(
+                    f"Go function `{function_name}` can dereference nil "
+                    "from a missing pointer-valued map lookup"
+                ),
+                confidence="medium",
+            ))
+            break
+
+    struct_fields = _go_struct_pointer_fields(package_source)
+    param_types = _go_param_types(params_text)
+    param_types.pop(receiver_name or "", None)
+    for param, raw_type in param_types.items():
+        type_name = raw_type.strip().lstrip("*")
+        if not raw_type.strip().startswith("*") or type_name not in struct_fields:
+            continue
+        for field in sorted(struct_fields[type_name]):
+            access = re.search(rf"\b{re.escape(param)}\s*\.\s*{re.escape(field)}\s*\.\s*([A-Za-z_]\w*)", body)
+            if access is None:
+                continue
+            following = body[access.end():].lstrip()
+            if following.startswith("("):
+                continue
+            prefix = body[:access.start()]
+            chain = rf"{re.escape(param)}\s*\.\s*{re.escape(field)}"
+            if re.search(rf"\b{chain}\s*(?:==|!=)\s*nil\b|\bnil\s*(?:==|!=)\s*{chain}\b", prefix):
+                continue
+            if re.search(rf"(?m)^\s*{re.escape(param)}\s*(?:=|:=)", prefix):
+                continue
+            issues.append(ForeignSafetyIssue(
+                function_name=function_name,
+                message=(
+                    f"Go function `{function_name}` can dereference nil "
+                    "through a pointer struct field chain"
+                ),
+                confidence="medium",
+            ))
+            return issues
+    return issues
+
+
 def _detect_safety_issues(
     source: str, language: str, source_file: str | None = None
 ) -> list[ForeignSafetyIssue]:
@@ -7090,6 +7182,7 @@ def _detect_go_safety_issues(
                 issue for issue in body_cast_sub if issue.message not in existing_msgs
             )
             issues.extend(_sentinel_index_issues(fn.name, body, "Go"))
+            issues.extend(_go_shallow_null_dereference_issues(fn.name, body, fn.params_text, package_source, receiver_name if is_method else None))
             issues.extend(_go_ignored_error_issues(fn.name, body, error_returns))
         issues = [
             issue
@@ -7276,6 +7369,7 @@ def _detect_go_safety_issues(
             issue for issue in body_cast_sub if issue.message not in existing_msgs
         )
         issues.extend(_sentinel_index_issues(_safe_identifier(name), body, "Go"))
+        issues.extend(_go_shallow_null_dereference_issues(_safe_identifier(name), body, params_text, package_source))
         issues.extend(
             _go_ignored_error_issues(_safe_identifier(name), body, error_returns)
         )
@@ -9725,7 +9819,7 @@ _SENTINEL_MINUS1_ASSIGNS: dict[str, re.Pattern[str]] = {
 _SENTINEL_UNDEFINED_ASSIGNS: dict[str, re.Pattern[str]] = {
     "TypeScript": re.compile(
         r"\b(?:let|const|var)\s+(?P<var>[A-Za-z_]\w*)\s*=\s*[\w.]+"
-        r"\.find\s*\("
+        r"\.(?P<callee>find|get)\s*\("
     ),
 }
 # Nested use of a sentinel-returning call inside an index expression:
@@ -9940,24 +10034,42 @@ def _sentinel_index_issues(
     if undefined_assign is not None:
         for match in undefined_assign.finditer(body):
             var = match.group("var")
+            if match.group("callee") == "get":
+                statement_end = body.find(";", match.end())
+                statement = body[match.start(): statement_end if statement_end >= 0 else len(body)]
+                assertion = re.search(r"\)\s+as\s+([^;\n]+)", statement)
+                if assertion is None or re.search(r"\b(?:undefined|null)\b", assertion.group(1)):
+                    continue
             unsafe = re.compile(
                 rf"\b{re.escape(var)}\s*\.|\b{re.escape(var)}\s*\["
                 rf"|\b{re.escape(var)}\s*[+\-*/%]"
             )
             for use in unsafe.finditer(body, match.end()):
+                if match.group("callee") == "get" and re.search(
+                    rf"(?<![\w$.]){re.escape(var)}\s*(?<![=!<>])=(?![=>])",
+                    body[match.end(): use.start()],
+                ):
+                    continue
                 if _sentinel_guarded(
                     body, var, use.start(), "undefined", since=match.end()
                 ):
                     continue
+                if match.group("callee") == "get":
+                    detail = (
+                        f"`{var}` (from a type-asserted `Map.get(...)`) without an "
+                        "`undefined`/`null` check — the assertion hides a missing-key "
+                        "`undefined`"
+                    )
+                else:
+                    detail = (
+                        f"`{var}` (from `.find(...)`) without an "
+                        "`undefined`/`null` check — `find` returns "
+                        "`undefined` when no element matches"
+                    )
                 issues.append(
                     ForeignSafetyIssue(
                         function_name=function_name,
-                        message=(
-                            f"{label} function `{function_name}` uses "
-                            f"`{var}` (from `.find(...)`) without an "
-                            "`undefined`/`null` check — `find` returns "
-                            "`undefined` when no element matches"
-                        ),
+                        message=f"{label} function `{function_name}` uses " + detail,
                         confidence="medium",
                     )
                 )

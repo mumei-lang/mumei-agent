@@ -10483,3 +10483,262 @@ contract Auction {
 }
 '''
     assert not [i for i in _detect_solidity_contract_issues(source) if "block entropy" in i.message]
+
+
+def test_typescript_type_asserted_map_get_dereference_is_medium_witness() -> None:
+    source = '''
+export function linkStats(links: Map<string, object>, code: string): object {
+  const link = links.get(code) as object;
+  return { code: link.code, target: link.target };
+}
+'''
+    issues = [i for i in _detect_safety_issues(source, "typescript") if "type-asserted `Map.get(...)`" in i.message]
+
+    assert len(issues) == 1
+    assert issues[0].function_name == "linkStats"
+    assert issues[0].confidence == "medium"
+    assert "undefined" in issues[0].message
+    assert "links" not in issues[0].message
+    assert "code" not in issues[0].message.split("`link`", 1)[-1]
+    assert not issues[0].counterexample
+
+
+def test_typescript_type_asserted_map_get_negative_controls() -> None:
+    prefix = "export function f(links: Map<string, object>, code: string): object {\n  %s\n}\n"
+    negatives = {
+        "plain_get": "const link = links.get(code); return link.x;",
+        "union_assertion": "const link = links.get(code) as object | undefined; return link.x;",
+        "undefined_guard": "const link = links.get(code) as object; if (link === undefined) return {}; return link.x;",
+        "null_guard": "const link = links.get(code) as object; if (link != null) { return link.x; } return {};",
+        "truthy_guard": "const link = links.get(code) as object; if (!link) return {}; return link.x;",
+        "optional_chain": "const link = links.get(code) as object; return { x: link?.x };",
+        "fallback": "const link = (links.get(code) ?? {}) as object; return link.x;",
+        "reassigned": "let link = links.get(code) as object; link = {}; return link.x;",
+        "no_deref": "const link = links.get(code) as object; return {};",
+    }
+    for name, body in negatives.items():
+        assert not [i for i in _detect_safety_issues(prefix % body, "typescript") if "type-asserted `Map.get(...)`" in i.message], name
+
+
+def test_typescript_find_sentinel_regression_and_guard_reuse() -> None:
+    positive = '''
+export function f(items: object[], id: string): object {
+  const item = items.find((x) => x.id === id);
+  return item.id;
+}
+'''
+    guarded = '''
+export function f(items: object[], id: string): object {
+  const item = items.find((x) => x.id === id);
+  if (!item) return {};
+  return item.id;
+}
+'''
+    assert [i for i in _detect_safety_issues(positive, "typescript") if "from `.find(...)`" in i.message]
+    assert not [i for i in _detect_safety_issues(guarded, "typescript") if "from `.find(...)`" in i.message]
+
+
+def test_typescript_map_get_message_omits_lookup_details() -> None:
+    sentinel = "unit-test-map-key-sentinel"
+    source = f'''
+export function f(secretMap: Map<string, object>): object {{
+  const link = secretMap.get("{sentinel}") as object;
+  return link.x;
+}}
+'''
+    issues = [i for i in _detect_safety_issues(source, "typescript") if "type-asserted `Map.get(...)`" in i.message]
+
+    assert len(issues) == 1
+    assert sentinel not in issues[0].message
+    assert "secretMap" not in issues[0].message
+    assert not issues[0].counterexample
+
+
+def _go_map_lookup_source(body: str, declaration: str = "var users = map[string]*user{}") -> str:
+    return f'''package main
+{declaration}
+type user struct{{ PasswordHash [20]byte }}
+var input struct{{ User string }}
+var hash [20]byte
+func loginHandler() bool {{
+{body}
+}}
+'''
+
+
+def test_go_pointer_valued_map_lookup_dereference_is_medium_witness() -> None:
+    source = _go_map_lookup_source('''    account := users[input.User]
+    return account.PasswordHash != hash
+''')
+    issues = [i for i in _detect_safety_issues(source, "go") if "missing pointer-valued map lookup" in i.message]
+
+    assert len(issues) == 1
+    assert issues[0].function_name == "loginHandler"
+    assert issues[0].confidence == "medium"
+    assert "nil" in issues[0].message
+    assert "users" not in issues[0].message
+    assert "input.User" not in issues[0].message
+    assert not issues[0].counterexample
+
+
+def test_go_pointer_valued_map_lookup_negative_controls() -> None:
+    bodies = {
+        "comma_ok": '''    account, ok := users[input.User]
+    _ = ok
+    return account.PasswordHash != hash
+''',
+        "nil_guard": '''    account := users[input.User]
+    if account == nil { return false }
+    return account.PasswordHash != hash
+''',
+        "non_nil_guard": '''    account := users[input.User]
+    if account != nil { return account.PasswordHash != hash }
+    return false
+''',
+        "fallback": '''    account := users[input.User]
+    if account == nil { account = &user{} }
+    return account.PasswordHash != hash
+''',
+        "no_deref": '''    account := users[input.User]
+    _ = account
+    return true
+''',
+        "reassigned": '''    account := users[input.User]
+    account = &user{}
+    return account.PasswordHash != hash
+''',
+    }
+    for name, body in bodies.items():
+        assert not [i for i in _detect_safety_issues(_go_map_lookup_source(body), "go") if "missing pointer-valued map lookup" in i.message], name
+
+    non_pointer = _go_map_lookup_source('''    account := users[input.User]
+    return account.PasswordHash != hash
+''', "var users = map[string]user{}")
+    unknown = _go_map_lookup_source('''    account := users[input.User]
+    return account.PasswordHash != hash
+''', "")
+    assert not [i for i in _detect_safety_issues(non_pointer, "go") if "missing pointer-valued map lookup" in i.message]
+    assert not [i for i in _detect_safety_issues(unknown, "go") if "missing pointer-valued map lookup" in i.message]
+
+
+def _go_struct_chain_source(body: str, extra: str = "") -> str:
+    return f'''package main
+type Supplier struct{{ Name string }}
+type Item struct{{ Supplier *Supplier }}
+type Plain struct{{ Supplier Supplier }}
+{extra}
+func viewItem(item *Item) string {{
+{body}
+}}
+'''
+
+
+def test_go_pointer_struct_field_chain_is_medium_witness() -> None:
+    source = _go_struct_chain_source("    return item.Supplier.Name\n")
+    issues = [i for i in _detect_safety_issues(source, "go") if "pointer struct field chain" in i.message]
+
+    assert len(issues) == 1
+    assert issues[0].function_name == "viewItem"
+    assert issues[0].confidence == "medium"
+    assert "nil" in issues[0].message
+    assert "Supplier" not in issues[0].message
+    assert not issues[0].counterexample
+
+
+def test_go_pointer_struct_field_chain_negative_controls() -> None:
+    negatives = {
+        "nil_guard": '''    if item.Supplier == nil { return "" }
+    return item.Supplier.Name
+''',
+        "non_nil_guard": '''    if item.Supplier != nil { return item.Supplier.Name }
+    return ""
+''',
+        "fallback": '''    supplierName := ""
+    if item.Supplier != nil { supplierName = item.Supplier.Name }
+    return supplierName
+''',
+        "no_chain_deref": "    return item.SKU\n",
+    }
+    for name, body in negatives.items():
+        assert not [i for i in _detect_safety_issues(_go_struct_chain_source(body), "go") if "pointer struct field chain" in i.message], name
+
+    non_pointer = '''package main
+type Supplier struct{ Name string }
+type Plain struct{ Supplier Supplier }
+func viewItem(item *Plain) string { return item.Supplier.Name }
+'''
+    unknown = '''package main
+func viewItem(item *Other) string { return item.Supplier.Name }
+'''
+    assert not [i for i in _detect_safety_issues(non_pointer, "go") if "pointer struct field chain" in i.message]
+    assert not [i for i in _detect_safety_issues(unknown, "go") if "pointer struct field chain" in i.message]
+
+
+def test_null_dereference_fixed_specimen_shapes_are_negative_controls() -> None:
+    ts_fixed = '''
+export function linkStats(links: Map<string, object>, code: string): object {
+  const link = links.get(code.toLowerCase());
+  if (link === undefined) throw new Error("not found");
+  return { code: link.code };
+}
+'''
+    go_map_fixed = '''package main
+var users = seedUsers()
+type user struct{ PasswordHash [20]byte }
+func seedUsers() map[string]*user { return nil }
+func loginHandler() bool {
+    account := users[input.User]
+    if account == nil { return false }
+    return account.PasswordHash != hash
+}
+'''
+    go_struct_fixed = '''package main
+type Supplier struct{ Name string }
+type Item struct{ Supplier *Supplier }
+func viewItem(item *Item) string {
+    supplierName := ""
+    if item.Supplier != nil { supplierName = item.Supplier.Name }
+    return supplierName
+}
+'''
+    assert not [i for i in _detect_safety_issues(ts_fixed, "typescript") if "type-asserted `Map.get(...)`" in i.message]
+    assert not [i for i in _detect_safety_issues(go_map_fixed, "go") if "missing pointer-valued map lookup" in i.message]
+    assert not [i for i in _detect_safety_issues(go_struct_fixed, "go") if "pointer struct field chain" in i.message]
+
+
+def test_null_dereference_medium_witnesses_reach_verifier_errors_without_lookup_details() -> None:
+    mumei = MagicMock()
+    mumei.verify.return_value = {"success": True, "report": {"status": "verified"}, "stdout": "{}", "stderr": ""}
+    cases = [
+        ("typescript", '''
+export function linkStats(links: Map<string, object>, code: string): object {
+  const link = links.get(code) as object;
+  return { code: link.code };
+}
+''', "type-asserted `Map.get(...)`", ("links", "code")),
+        ("go", '''package main
+var users = map[string]*user{}
+type user struct{ PasswordHash [20]byte }
+var input struct{ User string }
+var hash [20]byte
+func loginHandler() bool {
+    account := users[input.User]
+    return account.PasswordHash != hash
+}
+''', "missing pointer-valued map lookup", ("users", "input.User")),
+        ("go", '''package main
+type Supplier struct{ Name string }
+type Item struct{ Supplier *Supplier }
+func viewItem(item *Item) string {
+    return item.Supplier.Name
+}
+''', "pointer struct field chain", ("Supplier",)),
+    ]
+    for language, source, fragment, forbidden in cases:
+        result = ForeignCodeVerifier(mumei_client=mumei).verify(source, language)
+        hits = [error for error in result["errors"] if fragment in error]
+        assert len(hits) == 1, (language, result["errors"])
+        from agent.audit_findings import _violation_confidence
+        assert _violation_confidence(hits[0]) == "medium"
+        for value in forbidden:
+            assert value not in hits[0]
