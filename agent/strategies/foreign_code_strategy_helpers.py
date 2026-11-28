@@ -1118,7 +1118,6 @@ _PYTHON_NONCREDENTIAL_METADATA_KEY_PARTS = frozenset({
     "retry",
     "seconds",
     "sleep",
-    "time",
     "timeout",
     "timestamp",
     "ttl",

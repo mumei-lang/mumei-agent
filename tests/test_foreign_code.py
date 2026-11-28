@@ -10421,6 +10421,18 @@ import random
 def make_share_token():
     return {"token_second_factor": "%012x" % int(random.random() * (1 << 48))}
 ''',
+        '''
+import random
+
+def make_share_token():
+    return {"one_time_token": "%012x" % int(random.random() * (1 << 48))}
+''',
+        '''
+import random
+
+def make_share_token():
+    return {"oneTimePassword": "%012x" % int(random.random() * (1 << 48))}
+''',
     ]
 
     for source in negative_sources:
