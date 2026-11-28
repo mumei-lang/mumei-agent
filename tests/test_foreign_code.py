@@ -9656,7 +9656,11 @@ interface IERC20NoBool {
     function transfer(address to, uint256 amount) external returns (uint256);
 }
 contract Token { function transfer(address to, uint256 amount) external returns (bool) {} }
+contract CustomCaller {
+    function call(bytes memory data) external payable returns (uint256) { return 0; }
+}
 contract Pool {
+    CustomCaller public custom;
     IERC20Like public rewardToken;
     IERC20NoBool public noBoolToken;
     Token public token;
@@ -9667,6 +9671,7 @@ contract Pool {
         noValue.call("");
         payable(feeRecipient).send(fee);
         target.delegatecall("");
+        custom.call{value: fee}("x");
     }
     function getReward() public {
         require(rewardToken.transfer(msg.sender, amount));

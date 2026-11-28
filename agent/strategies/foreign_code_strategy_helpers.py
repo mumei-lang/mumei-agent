@@ -10068,11 +10068,18 @@ def _solidity_unchecked_call_issues(source: str) -> list[ForeignSafetyIssue]:
                             for assignment in assignments
                         )
                         member = _solidity_unwrap_expression(function_expr.child_by_field_name("type"))
+                        receiver = (
+                            _solidity_unwrap_expression(member.child_by_field_name("object"))
+                            if member is not None
+                            else None
+                        )
                         if (
                             has_value
                             and member is not None
                             and member.type == "member_expression"
                             and _solidity_node_text(source, member.child_by_field_name("property")) == "call"
+                            and receiver is not None
+                            and receiver.type == "payable_conversion_expression"
                         ):
                             kind = "low-level-value-call"
                     elif (
