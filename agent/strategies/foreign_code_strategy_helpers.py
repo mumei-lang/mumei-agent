@@ -1589,6 +1589,7 @@ def _with_hardcoded_secret_issues(
         *_hardcoded_secret_issues(source, language),
         *_timing_credential_issues(source, language),
         *_insecure_randomness_issues(source, language),
+        *_split_index_issues(source, language),
     ]
 
 
@@ -1701,6 +1702,431 @@ def _go_shallow_null_dereference_issues(
             ))
             return issues
     return issues
+
+
+# Precision-first shallow witness: track only direct split results and positive
+# literal indexes. Only a prior same-block bad-direction length guard whose body
+# cannot fall through suppresses a finding; broader dominance or dataflow is out of scope.
+def _split_index_issue(function_name: str, label: str, source_desc: str) -> ForeignSafetyIssue:
+    return ForeignSafetyIssue(
+        function_name=function_name,
+        message=(
+            f"{label} function `{function_name}` indexes {source_desc} "
+            "with a positive literal index without a dominating length guard"
+        ),
+        confidence="medium",
+    )
+
+
+def _python_split_call(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "split"
+    )
+
+
+def _python_positive_literal_index(node: ast.AST) -> int | None:
+    if (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, int)
+        and not isinstance(node.value, bool)
+        and node.value >= 1
+    ):
+        return node.value
+    return None
+
+
+def _python_walk_expression_shallow(node: ast.AST) -> Iterable[ast.AST]:
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        yield current
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
+        stack.extend(ast.iter_child_nodes(current))
+
+
+def _python_body_definitely_exits(body: list[ast.stmt]) -> bool:
+    return bool(body) and isinstance(body[-1], (ast.Return, ast.Raise, ast.Continue, ast.Break))
+
+
+def _python_len_exit_guard_limit(test: ast.AST) -> tuple[str, int] | None:
+    if not isinstance(test, ast.Compare) or len(test.ops) != 1 or len(test.comparators) != 1:
+        return None
+
+    def len_name(node: ast.AST) -> str | None:
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "len"
+            and len(node.args) == 1
+            and isinstance(node.args[0], ast.Name)
+        ):
+            return node.args[0].id
+        return None
+
+    def literal(node: ast.AST) -> int | None:
+        if isinstance(node, ast.Constant) and isinstance(node.value, int) and not isinstance(node.value, bool):
+            return node.value
+        return None
+
+    left_len = len_name(test.left)
+    right_literal = literal(test.comparators[0])
+    op = test.ops[0]
+    if left_len is not None and right_literal is not None:
+        if isinstance(op, ast.LtE):
+            return left_len, right_literal
+        if isinstance(op, ast.Lt):
+            return left_len, right_literal - 1
+        return None
+    left_literal = literal(test.left)
+    right_len = len_name(test.comparators[0])
+    if left_literal is not None and right_len is not None:
+        if isinstance(op, ast.GtE):
+            return right_len, left_literal
+        if isinstance(op, ast.Gt):
+            return right_len, left_literal - 1
+    return None
+
+
+def _python_split_index_issues(source: str) -> list[ForeignSafetyIssue]:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    def statement_expressions(stmt: ast.stmt) -> Iterable[ast.AST]:
+        statement_lists = {"body", "orelse", "finalbody", "handlers"}
+        for _field, value in ast.iter_fields(stmt):
+            if _field in statement_lists:
+                continue
+            if isinstance(value, ast.AST):
+                yield value
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, ast.AST) and not isinstance(item, ast.stmt):
+                        yield item
+
+    def nested_statement_lists(stmt: ast.stmt) -> Iterable[list[ast.stmt]]:
+        for field in ("body", "orelse", "finalbody"):
+            value = getattr(stmt, field, None)
+            if isinstance(value, list) and value and isinstance(value[0], ast.stmt):
+                yield value
+        for handler in getattr(stmt, "handlers", []):
+            if isinstance(handler, ast.ExceptHandler):
+                yield handler.body
+
+    def analyze_function(function: ast.FunctionDef) -> ForeignSafetyIssue | None:
+        assignment_counts: dict[str, int] = {}
+        for node in ast.walk(function):
+            targets: list[ast.AST] = []
+            if isinstance(node, ast.Assign):
+                targets = list(node.targets)
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+                targets = [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    assignment_counts[target.id] = assignment_counts.get(target.id, 0) + 1
+
+        def scan_expression(expression: ast.AST, split_vars: set[str], guarded_limits: dict[str, int]) -> bool:
+            for node in _python_walk_expression_shallow(expression):
+                if not isinstance(node, ast.Subscript):
+                    continue
+                index = _python_positive_literal_index(node.slice)
+                if index is None:
+                    continue
+                if _python_split_call(node.value):
+                    return True
+                if (
+                    isinstance(node.value, ast.Name)
+                    and node.value.id in split_vars
+                    and guarded_limits.get(node.value.id, -1) < index
+                ):
+                    return True
+            return False
+
+        def analyze_block(statements: list[ast.stmt], split_vars: set[str]) -> bool:
+            guarded_limits: dict[str, int] = {}
+            for stmt in statements:
+                if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    continue
+                if any(
+                    scan_expression(expression, split_vars, guarded_limits)
+                    for expression in statement_expressions(stmt)
+                ):
+                    return True
+                if isinstance(stmt, ast.If) and _python_body_definitely_exits(stmt.body):
+                    guard = _python_len_exit_guard_limit(stmt.test)
+                    if guard is not None:
+                        name, limit = guard
+                        guarded_limits[name] = max(limit, guarded_limits.get(name, -1))
+                if isinstance(stmt, ast.Assign):
+                    if len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+                        target = stmt.targets[0].id
+                        if target in split_vars:
+                            split_vars.remove(target)
+                            guarded_limits.pop(target, None)
+                        if assignment_counts.get(target, 0) == 1 and _python_split_call(stmt.value):
+                            split_vars.add(target)
+                elif isinstance(stmt, (ast.AnnAssign, ast.AugAssign)):
+                    target_node = stmt.target
+                    if isinstance(target_node, ast.Name):
+                        target = target_node.id
+                        if target in split_vars:
+                            split_vars.remove(target)
+                            guarded_limits.pop(target, None)
+                        if (
+                            isinstance(stmt, ast.AnnAssign)
+                            and stmt.value is not None
+                            and assignment_counts.get(target, 0) == 1
+                            and _python_split_call(stmt.value)
+                        ):
+                            split_vars.add(target)
+                for nested in nested_statement_lists(stmt):
+                    if analyze_block(nested, split_vars.copy()):
+                        return True
+            return False
+
+        if analyze_block(function.body, set()):
+            return _split_index_issue(
+                function.name,
+                "Python",
+                "a `str.split(...)` result",
+            )
+        return None
+
+    issues: list[ForeignSafetyIssue] = []
+    for function in [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]:
+        issue = analyze_function(function)
+        if issue is not None:
+            issues.append(issue)
+    return issues
+
+
+def _brace_depth_at(text: str, position: int) -> int:
+    """Approximate control-flow block depth, ignoring composite literals.
+
+    This is deliberately shallow syntax rather than language-level scope resolution:
+    braces whose line starts with a control keyword, or which directly follow a
+    parenthesized header/function literal, delimit blocks. Braces in composite
+    literals do not.
+    """
+    depth = 0
+    brace_kinds: list[bool] = []
+    for index, char in enumerate(text[:position]):
+        if char == "{":
+            line_start = text.rfind("\n", 0, index) + 1
+            prefix = text[line_start:index].strip()
+            previous = index - 1
+            while previous >= 0 and text[previous].isspace():
+                previous -= 1
+            is_control = bool(
+                re.match(
+                    r"(?:\}\s*)?(?:if|for|else|switch|select|while|loop|match)\b",
+                    prefix,
+                )
+                or (previous >= 0 and text[previous] == ")")
+            )
+            brace_kinds.append(is_control)
+            if is_control:
+                depth += 1
+        elif char == "}":
+            is_control = brace_kinds.pop() if brace_kinds else True
+            if is_control:
+                depth = max(0, depth - 1)
+    return depth
+
+
+def _top_level_block_text(text: str) -> str:
+    depth = 0
+    output: list[str] = []
+    for char in text:
+        if char == "{":
+            depth += 1
+            output.append(" ")
+        elif char == "}":
+            depth = max(0, depth - 1)
+            output.append(" ")
+        elif depth == 0:
+            output.append(char)
+        else:
+            output.append(" ")
+    return "".join(output)
+
+
+def _block_definitely_exits(block: str, language: str) -> bool:
+    top = _top_level_block_text(block)
+    if language == "go":
+        return bool(re.search(r"\b(?:return|continue|break)\b|\bpanic\s*\(|\bos\.Exit\s*\(", top))
+    return bool(re.search(r"\b(?:return|continue|break)\b|\bpanic\s*!|\bstd::process::exit\s*\(", top))
+
+
+def _text_len_exit_guard_limit(
+    body: str,
+    variable: str,
+    use_pos: int,
+    index: int,
+    language: str,
+) -> bool:
+    len_expr = rf"(?:len\s*\(\s*{re.escape(variable)}\s*\)|{re.escape(variable)}\s*\.\s*len\s*\(\s*\))"
+    pattern = re.compile(
+        rf"\bif\s+{len_expr}\s*(<=|<)\s*(\d+)\s*\{{"
+    )
+    use_depth = _brace_depth_at(body, use_pos)
+    for match in pattern.finditer(body, 0, use_pos):
+        if _brace_depth_at(body, match.start()) != use_depth:
+            continue
+        bound = int(match.group(2)) - (1 if match.group(1) == "<" else 0)
+        if bound < index:
+            continue
+        opening = body.find("{", match.start(), match.end())
+        if opening < 0:
+            continue
+        block = _balanced_brace_body(body, opening)
+        if _block_definitely_exits(block, language):
+            return True
+    return False
+
+
+def _text_reassigned_between(body: str, variable: str, start: int, end: int) -> bool:
+    return re.search(
+        rf"(?<![\w$]){re.escape(variable)}\s*(?::=|=(?![=]))",
+        body[start:end],
+    ) is not None
+
+
+def _go_split_index_issues(source: str) -> list[ForeignSafetyIssue]:
+    stripped = _strip_go_rust_literals_and_comments(source)
+    issues: list[ForeignSafetyIssue] = []
+    declarations = tree_sitter_extract.extract_functions(stripped, "go", _safe_identifier)
+    if declarations is not None:
+        blocks = [(fn.name, fn.body) for fn in declarations]
+    else:
+        blocks = [(name, body) for name, _params, _ret, body in _go_function_declarations(stripped)]
+    assign_re = re.compile(
+        r"\b(?:(?:var\s+(?P<varname>\w+)(?:\s+[\w\[\]*.]+)?\s*=)|(?:(?P<shortname>\w+)\s*:=))\s*strings\.(?P<callee>Split|Fields)\s*\("
+    )
+    direct_re = re.compile(r"\bstrings\.(?:Split|Fields)\s*\(")
+    for function_name, body in blocks:
+        reported = False
+        for direct in direct_re.finditer(body):
+            opening = direct.end() - 1
+            closing = _balanced_paren_end(body, opening)
+            if closing is None:
+                continue
+            index_match = re.match(r"\s*\[\s*([1-9]\d*)\s*\]", body[closing + 1:])
+            if index_match is None:
+                continue
+            issues.append(_split_index_issue(
+                function_name,
+                "Go",
+                "a `strings.Split`/`strings.Fields` result",
+            ))
+            reported = True
+            break
+        if reported:
+            continue
+        for assign in assign_re.finditer(body):
+            name = assign.group("varname") or assign.group("shortname")
+            use_re = re.compile(rf"\b{re.escape(name)}\s*\[\s*([1-9]\d*)\s*\]")
+            for use in use_re.finditer(body, assign.end()):
+                index = int(use.group(1))
+                if _text_reassigned_between(body, name, assign.end(), use.start()):
+                    break
+                if _text_len_exit_guard_limit(body, name, use.start(), index, "go"):
+                    continue
+                issues.append(_split_index_issue(
+                    function_name,
+                    "Go",
+                    "a `strings.Split`/`strings.Fields` result",
+                ))
+                reported = True
+                break
+            if reported:
+                break
+    return issues
+
+
+def _rust_is_split_vec_expression(expression: str, annotation: str | None) -> bool:
+    split = re.search(
+        r"\.\s*(?:split_whitespace\s*\(\s*\)|split\s*\([^)]*\))",
+        expression,
+    )
+    if split is None:
+        return False
+    collect = re.search(r"\.\s*collect\b", expression)
+    if collect is None:
+        return False
+    return annotation is not None or re.search(r"\.\s*collect\s*::\s*<\s*Vec\b", expression) is not None
+
+
+def _rust_split_index_issues(source: str) -> list[ForeignSafetyIssue]:
+    stripped = _strip_go_rust_literals_and_comments(source)
+    issues: list[ForeignSafetyIssue] = []
+    assign_re = re.compile(
+        r"\blet\s+(?:mut\s+)?(?P<name>\w+)\s*(?P<annotation>:\s*Vec\s*<[^;=]+>)?\s*=\s*(?P<expr>[^;]+);",
+        re.DOTALL,
+    )
+    direct_re = re.compile(r"\.\s*(?:split_whitespace|split)\s*\(")
+    for function_name, body, _params in _rust_function_scopes(stripped):
+        reported = False
+        for direct in direct_re.finditer(body):
+            opening = direct.end() - 1
+            closing = _balanced_paren_end(body, opening)
+            if closing is None:
+                continue
+            tail = body[closing + 1:]
+            index_match = re.match(
+                r"\s*\.\s*collect\s*::\s*<(?P<generic>[^;()\[\]]+)>\s*\(\s*\)\s*\[\s*([1-9]\d*)\s*\]",
+                tail,
+            )
+            if index_match is None or not re.search(r"\bVec\b", index_match.group("generic")):
+                continue
+            issues.append(_split_index_issue(
+                function_name,
+                "Rust",
+                "a split-produced `Vec`",
+            ))
+            reported = True
+            break
+        if reported:
+            continue
+        assigned_names: set[str] = set()
+        for assign in assign_re.finditer(body):
+            name = assign.group("name")
+            if name in assigned_names:
+                continue
+            assigned_names.add(name)
+            if not _rust_is_split_vec_expression(assign.group("expr"), assign.group("annotation")):
+                continue
+            use_re = re.compile(rf"\b{re.escape(name)}\s*\[\s*([1-9]\d*)\s*\]")
+            for use in use_re.finditer(body, assign.end()):
+                index = int(use.group(1))
+                if _text_reassigned_between(body, name, assign.end(), use.start()):
+                    break
+                if _text_len_exit_guard_limit(body, name, use.start(), index, "rust"):
+                    continue
+                issues.append(_split_index_issue(
+                    function_name,
+                    "Rust",
+                    "a split-produced `Vec`",
+                ))
+                reported = True
+                break
+            if reported:
+                break
+    return issues
+
+
+def _split_index_issues(source: str, language: str) -> list[ForeignSafetyIssue]:
+    if language == "python":
+        return _python_split_index_issues(source)
+    if language == "go":
+        return _go_split_index_issues(source)
+    if language == "rust":
+        return _rust_split_index_issues(source)
+    return []
 
 
 def _detect_safety_issues(
