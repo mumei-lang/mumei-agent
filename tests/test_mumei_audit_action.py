@@ -972,6 +972,8 @@ def test_verify_downloaded_action_artifact_rejects_forbidden_literal(tmp_path: P
 
     assert completed.returncode != 0
     assert "credential-like sentinel" in completed.stderr
+    assert "fake-password-value" not in completed.stdout
+    assert "fake-password-value" not in completed.stderr
 
 
 def test_verify_downloaded_action_artifact_rejects_symlink_and_escaping_claim(tmp_path: Path) -> None:
