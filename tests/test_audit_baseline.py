@@ -484,3 +484,21 @@ def test_high_confidence_policy_catches_unchecked_calls() -> None:
 
     assert audit_exit_code(result, fail_on="high-confidence") == 1
     assert audit_exit_code(result, fail_on="never") == 0
+
+
+def test_high_confidence_policy_catches_strong_insecure_randomness_only() -> None:
+    high = _result(
+        verification_status="unverifiable",
+        verification_violations=[
+            "Python function `make_share_token` generates credential material with direct weak randomness at line 25"
+        ],
+    )
+    medium = _result(
+        verification_status="unverifiable",
+        verification_violations=[
+            "TypeScript function `generateCode` generates a lookup capability with direct weak randomness at line 36"
+        ],
+    )
+
+    assert audit_exit_code(high, fail_on="high-confidence") == 1
+    assert audit_exit_code(medium, fail_on="high-confidence") == 0

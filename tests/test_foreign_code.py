@@ -16,6 +16,7 @@ from agent.strategies.foreign_code_strategy import (
 )
 from agent.strategies.foreign_code_strategy_helpers import (
     _detect_python_safety_issues,
+    _detect_safety_issues,
     _detect_solidity_contract_issues,
     build_solidity_access_control_proof_certificate,
     build_solidity_cei_proof_certificate,
@@ -9731,3 +9732,440 @@ contract Pool {{
     assert sentinel not in str(issues[0].counterexample)
     assert sentinel not in captured.out
     assert sentinel not in captured.err
+
+
+def test_python_insecure_randomness_detects_direct_weak_credential_generation() -> None:
+    source = '''
+import random
+
+def make_share_token() -> str:
+    return "%012x" % int(random.random() * (1 << 48))
+'''
+    issues = [i for i in _detect_safety_issues(source, "python") if "weak randomness" in i.message]
+
+    assert len(issues) == 1
+    assert issues[0].function_name == "make_share_token"
+    assert issues[0].message == "Python function `make_share_token` generates credential material with direct weak randomness at line 5"
+    assert issues[0].line == 5
+    assert not issues[0].counterexample
+
+
+def test_python_insecure_randomness_negative_controls() -> None:
+    sources = [
+        '''
+import secrets
+
+def make_share_token() -> str:
+    return secrets.token_hex(16)
+''',
+        '''
+import random
+
+def make_share_token() -> str:
+    return "%012x" % int(random.SystemRandom().random() * (1 << 48))
+''',
+        '''
+import random
+
+def make_noise() -> float:
+    return random.random()
+''',
+        '''
+import random
+
+def make_share_token(random) -> str:
+    return "%012x" % int(random.random() * (1 << 48))
+''',
+        '''
+import random
+
+def make_share_token() -> str:
+    random = object()
+    return "%012x" % int(random.random() * (1 << 48))
+''',
+    ]
+
+    for source in sources:
+        assert not [i for i in _detect_safety_issues(source, "python") if "weak randomness" in i.message]
+
+
+def test_go_insecure_randomness_detects_timestamp_credential_generation() -> None:
+    source = '''package auth
+
+import (
+    "fmt"
+    "time"
+)
+
+func loginHandler() string {
+    token := fmt.Sprintf("%d", time.Now().UnixNano())
+    return token
+}
+'''
+    issues = [i for i in _detect_safety_issues(source, "go") if "timestamp" in i.message and "credential material" in i.message]
+
+    assert len(issues) == 1
+    assert issues[0].function_name == "loginHandler"
+    assert issues[0].message == "Go function `loginHandler` generates credential material from a timestamp at line 9"
+    assert issues[0].line == 9
+    assert not issues[0].counterexample
+
+
+def test_go_insecure_randomness_negative_controls() -> None:
+    non_credential = '''package auth
+import (
+    "fmt"
+    "time"
+)
+func logID() string {
+    id := fmt.Sprintf("%d", time.Now().UnixNano())
+    return id
+}
+'''
+    crypto_rand = '''package auth
+import "crypto/rand"
+func loginHandler() string {
+    token := randomHex(32)
+    return token
+}
+'''
+    parameter_shadow = '''package auth
+import (
+    "fmt"
+    "time"
+)
+func loginHandler(time clock) string {
+    token := fmt.Sprintf("%d", time.Now().UnixNano())
+    return token
+}
+'''
+    local_shadow = '''package auth
+import (
+    "fmt"
+    "time"
+)
+func loginHandler() string {
+    time := clock{}
+    token := fmt.Sprintf("%d", time.Now().UnixNano())
+    return token
+}
+'''
+    missing_import = '''package auth
+import "fmt"
+func loginHandler() string {
+    token := fmt.Sprintf("%d", time.Now().UnixNano())
+    return token
+}
+'''
+
+    for source in (non_credential, crypto_rand, parameter_shadow, local_shadow, missing_import):
+        assert not [i for i in _detect_safety_issues(source, "go") if "credential material" in i.message]
+
+
+def test_typescript_insecure_randomness_detects_capability_key_generation() -> None:
+    source = '''
+export function generateCode(): string {
+  return Math.random().toString(36).slice(2, 9);
+}
+export function createLink(links: Map<string, object>): object {
+  const code = generateCode();
+  const link = { code };
+  links.set(code, link);
+  return link;
+}
+export function resolveLink(links: Map<string, object>, code: string): object | undefined {
+  return links.get(code);
+}
+'''
+    issues = [i for i in _detect_safety_issues(source, "typescript") if "weak randomness" in i.message]
+
+    assert len(issues) == 1
+    assert issues[0].function_name == "generateCode"
+    assert issues[0].message == "TypeScript function `generateCode` generates a lookup capability with direct weak randomness at line 3"
+    assert issues[0].confidence == "medium"
+    assert issues[0].line == 3
+
+
+def test_typescript_insecure_randomness_negative_controls() -> None:
+    secure = '''
+import { randomInt } from "node:crypto";
+export function generateCode(): string {
+  return String(randomInt(1000000));
+}
+'''
+    no_capability = '''
+export function generateCode(): string {
+  return Math.random().toString(36).slice(2, 9);
+}
+'''
+    set_without_get = '''
+export function generateCode(): string {
+  return Math.random().toString(36).slice(2, 9);
+}
+export function createLink(links: Map<string, object>): object {
+  const code = generateCode();
+  links.set(code, { code });
+  return { code };
+}
+'''
+    math_shadow = '''
+const Math = { random: () => 0.5 };
+export function generateCode(): string {
+  return Math.random().toString(36).slice(2, 9);
+}
+export function createLink(links: Map<string, object>): object {
+  const code = generateCode();
+  links.set(code, { code });
+  return { code };
+}
+export function resolveLink(links: Map<string, object>, code: string): object | undefined {
+  return links.get(code);
+}
+'''
+
+    for source in (secure, no_capability, set_without_get, math_shadow):
+        assert not [i for i in _detect_safety_issues(source, "typescript") if "weak randomness" in i.message]
+
+
+def test_solidity_insecure_randomness_detects_block_entropy_winner_selection() -> None:
+    source = '''
+contract Auction {
+    address[] players;
+    function drawWinner() public {
+        uint256 n = players.length;
+        uint256 idx = uint256(keccak256(abi.encodePacked(block.timestamp, block.prevrandao, n))) % n;
+        address winner = players[idx];
+    }
+}
+'''
+    issues = [i for i in _detect_solidity_contract_issues(source) if "block entropy" in i.message]
+
+    assert len(issues) == 1
+    assert issues[0].function_name == "drawWinner"
+    assert issues[0].message == "Solidity function `drawWinner` derives random winner selection from predictable block entropy at line 6"
+    assert issues[0].line == 6
+    assert not issues[0].counterexample
+
+
+def test_solidity_insecure_randomness_negative_controls() -> None:
+    deadline = '''
+contract Auction {
+    uint256 endTime;
+    function drawWinner() public view {
+        require(block.timestamp > endTime, "open");
+    }
+}
+'''
+    lockup = '''
+contract Vault {
+    mapping(address => uint256) lockEnd;
+    function drawWinner(address user) public view {
+        require(block.timestamp >= lockEnd[user], "locked");
+    }
+}
+'''
+    no_selection = '''
+contract Helper {
+    function mix(uint256 n) public view returns (uint256) {
+        return uint256(keccak256(abi.encodePacked(block.timestamp, n))) % n;
+    }
+}
+'''
+
+    for source in (deadline, lockup, no_selection):
+        assert not [i for i in _detect_solidity_contract_issues(source) if "block entropy" in i.message]
+
+
+def test_insecure_randomness_never_outputs_source_values(capsys) -> None:
+    sentinel = "unit-test-randomness-sentinel"
+    python_source = f'''
+import random
+
+def make_share_token() -> str:
+    return "{sentinel}" % int(random.random() * 100)
+'''
+    go_source = '''package auth
+import (
+    "fmt"
+    "time"
+)
+func loginHandler() string {
+    token := fmt.Sprintf("''' + sentinel + '''", time.Now().UnixNano())
+    return token
+}
+'''
+    python_issues = [i for i in _detect_safety_issues(python_source, "python") if "weak randomness" in i.message]
+    go_issues = [i for i in _detect_safety_issues(go_source, "go") if "credential material" in i.message]
+    captured = capsys.readouterr()
+
+    assert len(python_issues) == 1
+    assert len(go_issues) == 1
+    for issue in [*python_issues, *go_issues]:
+        assert sentinel not in issue.message
+        assert sentinel not in str(issue.counterexample)
+    assert sentinel not in captured.out
+    assert sentinel not in captured.err
+
+
+def test_python_insecure_randomness_function_or_class_shadow_is_suppressed() -> None:
+    for shadow in ("def random():\n    pass\n", "class random:\n    pass\n"):
+        source = f'''
+import random
+
+{shadow}
+
+def make_share_token() -> str:
+    return "%012x" % int(random.random() * (1 << 48))
+'''
+        assert not [i for i in _detect_safety_issues(source, "python") if "weak randomness" in i.message]
+
+
+def test_typescript_insecure_randomness_import_and_parameter_shadows_are_suppressed() -> None:
+    capability_tail = '''
+export function createLink(links: Map<string, object>): object {
+  const code = generateCode();
+  links.set(code, { code });
+  return { code };
+}
+export function resolveLink(links: Map<string, object>, code: string): object | undefined {
+  return links.get(code);
+}
+'''
+    import_shadow = 'import Math from "./math";\nexport function generateCode(): string {\n  return Math.random().toString(36);\n}\n' + capability_tail
+    parameter_shadow = 'export function generateCode(Math: { random(): number }): string {\n  return Math.random().toString(36);\n}\n' + capability_tail
+
+    for source in (import_shadow, parameter_shadow):
+        assert not [i for i in _detect_safety_issues(source, "typescript") if "weak randomness" in i.message]
+
+
+def test_insecure_randomness_sentinel_not_in_verifier_result_or_written_spec(capsys) -> None:
+    secret = "unit-test-randomness-verifier-sentinel"
+    written: list[str] = []
+
+    def fake_verify(path: str, **kwargs) -> dict:
+        written.append(Path(path).read_text(encoding="utf-8"))
+        return {"success": True, "report": {"status": "verified"}, "stdout": "{}", "stderr": ""}
+
+    mumei = MagicMock()
+    mumei.verify.side_effect = fake_verify
+    source = f'''
+import random
+
+def make_share_token() -> str:
+    return "{secret}" % int(random.random() * 100)
+'''
+
+    result = ForeignCodeVerifier(mumei_client=mumei).verify(source, "python")
+
+    assert result["success"] is False
+    assert any("weak randomness" in error for error in result["errors"])
+    assert secret not in json.dumps(result, sort_keys=True)
+    assert all(secret not in text for text in written)
+    captured = capsys.readouterr()
+    assert secret not in captured.out
+    assert secret not in captured.err
+
+
+def test_solidity_generic_random_name_alone_is_not_strong_selection_witness() -> None:
+    source = '''
+contract Helper {
+    function pickRandom(uint256 n) public view returns (uint256) {
+        return uint256(keccak256(abi.encodePacked(block.timestamp, n))) % n;
+    }
+}
+'''
+    assert not [i for i in _detect_solidity_contract_issues(source) if "block entropy" in i.message]
+
+
+def test_python_insecure_randomness_does_not_attribute_nested_helper_to_outer_function() -> None:
+    source = '''
+import random
+
+def make_share_token() -> str:
+    def weak_random():
+        return random.random()
+    return "deterministic"
+'''
+    assert not [i for i in _detect_safety_issues(source, "python") if "weak randomness" in i.message]
+
+
+def test_go_insecure_randomness_does_not_attribute_nested_closure_to_outer_function() -> None:
+    source = '''package auth
+import (
+    "fmt"
+    "time"
+)
+func loginHandler() {
+    helper := func() {
+        token := fmt.Sprintf("%d", time.Now().UnixNano())
+        _ = token
+    }
+    _ = helper
+}
+'''
+    assert not [i for i in _detect_safety_issues(source, "go") if "credential material" in i.message]
+
+
+def test_typescript_insecure_randomness_destructured_math_shadow_is_suppressed() -> None:
+    source = '''
+export function generateCode({Math}: { Math: { random(): number } }): string {
+  return Math.random().toString(36);
+}
+export function createLink(links: Map<string, object>): object {
+  const code = generateCode({ Math });
+  links.set(code, { code });
+  return { code };
+}
+export function resolveLink(links: Map<string, object>, code: string): object | undefined {
+  return links.get(code);
+}
+'''
+    assert not [i for i in _detect_safety_issues(source, "typescript") if "weak randomness" in i.message]
+
+
+def test_python_insecure_randomness_does_not_attribute_lambda_to_outer_function() -> None:
+    source = '''
+import random
+
+def make_share_token() -> str:
+    weak = lambda: random.random()
+    return "deterministic"
+'''
+    assert not [i for i in _detect_safety_issues(source, "python") if "weak randomness" in i.message]
+
+
+def test_go_insecure_randomness_mixed_entropy_is_negative_control() -> None:
+    source = '''package auth
+import (
+    "fmt"
+    "time"
+)
+func loginHandler() string {
+    token := fmt.Sprintf("%d-%s", time.Now().UnixNano(), secureRandom())
+    return token
+}
+'''
+    assert not [i for i in _detect_safety_issues(source, "go") if "credential material" in i.message]
+
+
+def test_python_insecure_randomness_except_and_walrus_shadows_are_suppressed() -> None:
+    except_shadow = '''
+import random
+
+def make_share_token() -> str:
+    try:
+        pass
+    except Exception as random:
+        pass
+    return "%012x" % int(random.random() * (1 << 48))
+'''
+    walrus_shadow = '''
+import random
+
+def make_share_token() -> str:
+    if (random := object()):
+        pass
+    return "%012x" % int(random.random() * (1 << 48))
+'''
+    for source in (except_shadow, walrus_shadow):
+        assert not [i for i in _detect_safety_issues(source, "python") if "weak randomness" in i.message]

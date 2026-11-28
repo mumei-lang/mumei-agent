@@ -991,6 +991,449 @@ def _python_timing_credential_issues(source: str) -> list[ForeignSafetyIssue]:
     return issues
 
 
+_STRONG_CREDENTIAL_WORDS = frozenset({"token", "session", "secret", "password", "key"})
+_STRONG_ENTROPY_SELECTION_WORDS = frozenset({"winner", "draw", "prize", "lottery", "raffle"})
+
+
+def _name_parts(name: str) -> list[str]:
+    normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name).lower()
+    return [part for part in re.split(r"[^a-z0-9]+", normalized) if part]
+
+
+def _has_strong_credential_name(name: str) -> bool:
+    return any(part in _STRONG_CREDENTIAL_WORDS for part in _name_parts(name))
+
+
+def _has_entropy_selection_name(name: str) -> bool:
+    return any(part in _STRONG_ENTROPY_SELECTION_WORDS for part in _name_parts(name))
+
+
+def _tree_nodes(node):
+    yield node
+    for child in node.children:
+        yield from _tree_nodes(child)
+
+
+def _python_target_names(target: ast.AST) -> set[str]:
+    if isinstance(target, ast.Name):
+        return {target.id}
+    if isinstance(target, ast.Starred):
+        return _python_target_names(target.value)
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return {name for element in target.elts for name in _python_target_names(element)}
+    return set()
+
+
+def _python_binds_name(tree: ast.AST, name: str) -> bool:
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == name:
+            return True
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            arguments = [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
+            if any(parameter.arg == name for parameter in arguments):
+                return True
+        targets: list[ast.AST] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets = [node.target]
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            targets = [node.target]
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            targets = [item.optional_vars for item in node.items if item.optional_vars is not None]
+        elif isinstance(node, ast.NamedExpr):
+            targets = [node.target]
+        if any(name in _python_target_names(target) for target in targets):
+            return True
+        if isinstance(node, ast.ExceptHandler) and node.name == name:
+            return True
+    return False
+
+
+def _python_imports_random_module(tree: ast.AST) -> bool:
+    return any(
+        isinstance(node, ast.Import)
+        and any(alias.name == "random" and alias.asname in {None, "random"} for alias in node.names)
+        for node in tree.body
+    )
+
+
+def _python_function_own_nodes(function: ast.AST):
+    stack = list(function.body) if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)) else []
+    while stack:
+        node = stack.pop()
+        yield node
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _python_insecure_randomness_issues(source: str) -> list[ForeignSafetyIssue]:
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    if not _python_imports_random_module(tree) or _python_binds_name(tree, "random"):
+        return []
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    issues: list[ForeignSafetyIssue] = []
+    for function in [node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        function_is_credential = _has_strong_credential_name(function.name)
+        for node in _python_function_own_nodes(function):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "random"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "random"
+            ):
+                continue
+            credential_context = function_is_credential
+            if not credential_context:
+                cursor = node
+                while cursor in parents and parents[cursor] is not function:
+                    cursor = parents[cursor]
+                    if isinstance(cursor, ast.Assign):
+                        credential_context = any(
+                            _has_strong_credential_name(name)
+                            for target in cursor.targets
+                            for name in _python_target_names(target)
+                        )
+                    elif isinstance(cursor, ast.AnnAssign):
+                        credential_context = any(
+                            _has_strong_credential_name(name)
+                            for name in _python_target_names(cursor.target)
+                        )
+                    if credential_context:
+                        break
+            if credential_context:
+                issues.append(ForeignSafetyIssue(
+                    function_name=function.name,
+                    message=(
+                        f"Python function `{function.name}` generates credential material "
+                        f"with direct weak randomness at line {node.lineno}"
+                    ),
+                    line=node.lineno,
+                ))
+                break
+    return issues
+
+
+def _go_unaliased_import_names(root, source_bytes: bytes) -> set[str]:
+    names: set[str] = set()
+    for node in _tree_nodes(root):
+        if node.type != "import_spec":
+            continue
+        path_node = node.child_by_field_name("path")
+        if path_node is None:
+            continue
+        path = _node_text(source_bytes, path_node).strip('"`')
+        if path not in {"fmt", "time"}:
+            continue
+        alias_node = node.child_by_field_name("name")
+        if alias_node is None or _node_text(source_bytes, alias_node) == path:
+            names.add(path)
+    return names
+
+
+def _go_function_shadowed_package_names(function_node, source_bytes: bytes) -> set[str]:
+    shadowed: set[str] = set()
+    for node in _tree_nodes(function_node):
+        if node.type == "parameter_declaration":
+            for child in node.children:
+                if child.type == "identifier" and _node_text(source_bytes, child) in {"fmt", "time"}:
+                    shadowed.add(_node_text(source_bytes, child))
+        elif node.type == "var_spec":
+            first = next((child for child in node.children if child.type == "identifier"), None)
+            if first is not None and _node_text(source_bytes, first) in {"fmt", "time"}:
+                shadowed.add(_node_text(source_bytes, first))
+        elif node.type == "short_var_declaration":
+            expression_lists = [child for child in node.children if child.type == "expression_list"]
+            if expression_lists:
+                for child in _tree_nodes(expression_lists[0]):
+                    if child.type == "identifier" and _node_text(source_bytes, child) in {"fmt", "time"}:
+                        shadowed.add(_node_text(source_bytes, child))
+    return shadowed
+
+
+def _go_node_belongs_to_function(node, function_node) -> bool:
+    cursor = node.parent
+    while cursor is not None:
+        if cursor == function_node:
+            return True
+        if cursor.type == "func_literal":
+            return False
+        cursor = cursor.parent
+    return False
+
+
+def _go_direct_timestamp_sprintf(node, source_bytes: bytes) -> bool:
+    for child in _tree_nodes(node):
+        if child.type != "call_expression":
+            continue
+        function = child.child_by_field_name("function")
+        arguments = child.child_by_field_name("arguments")
+        if function is None or arguments is None or _node_text(source_bytes, function) != "fmt.Sprintf":
+            continue
+        args = arguments.named_children
+        if len(args) != 2 or args[0].type != "interpreted_string_literal":
+            continue
+        if re.fullmatch(r"time\s*\.\s*Now\s*\(\s*\)\s*\.\s*UnixNano\s*\(\s*\)", _node_text(source_bytes, args[1])):
+            return True
+    return False
+
+
+def _go_insecure_randomness_issues(source: str) -> list[ForeignSafetyIssue]:
+    tree, source_bytes = tree_sitter_extract.parse(source, "go")
+    if tree is None or source_bytes is None:
+        return []
+    imported = _go_unaliased_import_names(tree.root_node, source_bytes)
+    if not {"fmt", "time"} <= imported:
+        return []
+    issues: list[ForeignSafetyIssue] = []
+    for function_node in [node for node in _tree_nodes(tree.root_node) if node.type == "function_declaration"]:
+        if _go_function_shadowed_package_names(function_node, source_bytes):
+            continue
+        name_node = function_node.child_by_field_name("name")
+        function_name = _node_text(source_bytes, name_node) if name_node is not None else "main"
+        for node in _tree_nodes(function_node):
+            if node.type != "short_var_declaration" or not _go_node_belongs_to_function(node, function_node):
+                continue
+            expression_lists = [child for child in node.children if child.type == "expression_list"]
+            if len(expression_lists) < 2:
+                continue
+            lhs_names = [
+                _node_text(source_bytes, child)
+                for child in _tree_nodes(expression_lists[0])
+                if child.type == "identifier"
+            ]
+            if not any(_has_strong_credential_name(name) for name in lhs_names):
+                continue
+            if not _go_direct_timestamp_sprintf(expression_lists[1], source_bytes):
+                continue
+            issues.append(ForeignSafetyIssue(
+                function_name=function_name,
+                message=(
+                    f"Go function `{function_name}` generates credential material "
+                    f"from a timestamp at line {node.start_point[0] + 1}"
+                ),
+                line=node.start_point[0] + 1,
+            ))
+    return issues
+
+
+def _typescript_pattern_binds_math(node, source_bytes: bytes) -> bool:
+    if node is None:
+        return False
+    if node.type in {"identifier", "shorthand_property_identifier_pattern"}:
+        return _node_text(source_bytes, node) == "Math"
+    return any(_typescript_pattern_binds_math(child, source_bytes) for child in node.children)
+
+
+def _typescript_declares_math(root, source_bytes: bytes) -> bool:
+    for node in _tree_nodes(root):
+        if node.type == "variable_declarator":
+            if _typescript_pattern_binds_math(node.child_by_field_name("name"), source_bytes):
+                return True
+        elif node.type in {"required_parameter", "optional_parameter"}:
+            pattern = next(
+                (child for child in node.children if child.type in {"identifier", "object_pattern", "array_pattern"}),
+                None,
+            )
+            if _typescript_pattern_binds_math(pattern, source_bytes):
+                return True
+        elif node.type in {"function_declaration", "class_declaration"}:
+            name = node.child_by_field_name("name")
+            if name is not None and _node_text(source_bytes, name) == "Math":
+                return True
+        elif node.type == "import_statement":
+            clause = next((child for child in node.children if child.type == "import_clause"), None)
+            if _typescript_pattern_binds_math(clause, source_bytes):
+                return True
+    return False
+
+
+def _typescript_is_math_random_call(node, source_bytes: bytes) -> bool:
+    if node.type != "call_expression":
+        return False
+    function = node.child_by_field_name("function")
+    if function is None or function.type != "member_expression":
+        return False
+    obj = function.child_by_field_name("object")
+    prop = function.child_by_field_name("property")
+    return (
+        obj is not None
+        and prop is not None
+        and _node_text(source_bytes, obj) == "Math"
+        and _node_text(source_bytes, prop) == "random"
+    )
+
+
+def _typescript_contains_direct_call(node, source_bytes: bytes, callee: str) -> bool:
+    for child in _tree_nodes(node):
+        if child.type != "call_expression":
+            continue
+        function = child.child_by_field_name("function")
+        if function is not None and function.type == "identifier" and _node_text(source_bytes, function) == callee:
+            return True
+    return False
+
+
+def _typescript_member_call(node, source_bytes: bytes) -> tuple[str, str, list[str]] | None:
+    if node.type != "call_expression":
+        return None
+    function = node.child_by_field_name("function")
+    arguments = node.child_by_field_name("arguments")
+    if function is None or function.type != "member_expression" or arguments is None:
+        return None
+    prop = function.child_by_field_name("property")
+    obj = function.child_by_field_name("object")
+    if prop is None or obj is None:
+        return None
+    args = [
+        _node_text(source_bytes, child)
+        for child in arguments.named_children
+        if child.type == "identifier"
+    ]
+    return _node_text(source_bytes, obj), _node_text(source_bytes, prop), args
+
+
+def _typescript_capability_key_witness(root, source_bytes: bytes, weak_functions: set[str]) -> bool:
+    key_names: set[str] = set()
+    for function_node in [node for node in _tree_nodes(root) if node.type in _TREE_FUNCTION_TYPES["typescript"]]:
+        for declaration in [node for node in _tree_nodes(function_node) if node.type == "variable_declarator"]:
+            name = declaration.child_by_field_name("name")
+            value = declaration.child_by_field_name("value")
+            if name is None or value is None:
+                continue
+            key = _node_text(source_bytes, name)
+            if not any(_typescript_contains_direct_call(value, source_bytes, weak) for weak in weak_functions):
+                continue
+            for call in [node for node in _tree_nodes(function_node) if node.type == "call_expression"]:
+                parts = _typescript_member_call(call, source_bytes)
+                if parts is not None and parts[1] == "set" and parts[2] and parts[2][0] == key:
+                    key_names.add(key)
+    if not key_names:
+        return False
+    for call in [node for node in _tree_nodes(root) if node.type == "call_expression"]:
+        parts = _typescript_member_call(call, source_bytes)
+        if parts is not None and parts[1] == "get" and parts[2] and parts[2][0] in key_names:
+            return True
+    return False
+
+
+def _typescript_insecure_randomness_issues(source: str) -> list[ForeignSafetyIssue]:
+    tree, source_bytes = tree_sitter_extract.parse(source, "typescript")
+    if tree is None or source_bytes is None or _typescript_declares_math(tree.root_node, source_bytes):
+        return []
+    weak_calls: list[tuple[str, object]] = []
+    weak_functions: set[str] = set()
+    for node in _tree_nodes(tree.root_node):
+        if not _typescript_is_math_random_call(node, source_bytes):
+            continue
+        function_name = _tree_enclosing_function_name(node, source_bytes, "typescript")
+        if function_name:
+            weak_calls.append((function_name, node))
+            weak_functions.add(function_name)
+    if not weak_calls or not _typescript_capability_key_witness(tree.root_node, source_bytes, weak_functions):
+        return []
+    issues: list[ForeignSafetyIssue] = []
+    seen: set[str] = set()
+    for function_name, node in weak_calls:
+        if function_name in seen:
+            continue
+        seen.add(function_name)
+        line = node.start_point[0] + 1
+        issues.append(ForeignSafetyIssue(
+            function_name=function_name,
+            message=(
+                f"TypeScript function `{function_name}` generates a lookup capability "
+                f"with direct weak randomness at line {line}"
+            ),
+            confidence="medium",
+            line=line,
+        ))
+    return issues
+
+
+def _solidity_tree_contains_block_entropy(node, source_bytes: bytes) -> bool:
+    for child in _tree_nodes(node):
+        if child.type == "member_expression":
+            text = _node_text(source_bytes, child)
+            if re.fullmatch(r"block\.(?:timestamp|prevrandao|difficulty|coinbase|number)", text):
+                return True
+        elif child.type == "call_expression" and re.match(r"\s*blockhash\s*\(", _node_text(source_bytes, child)):
+            return True
+    return False
+
+
+def _solidity_entropy_selection_witness(function_node, source_bytes: bytes) -> bool:
+    names: list[str] = []
+    name_node = function_node.child_by_field_name("name")
+    if name_node is not None:
+        names.append(_node_text(source_bytes, name_node))
+    for node in _tree_nodes(function_node):
+        if node.type == "variable_declaration":
+            identifier = next((child for child in node.children if child.type == "identifier"), None)
+            if identifier is not None:
+                names.append(_node_text(source_bytes, identifier))
+    return any(_has_entropy_selection_name(name) for name in names)
+
+
+def _solidity_entropy_selection_expression(function_node, source_bytes: bytes):
+    for node in _tree_nodes(function_node):
+        if node.type == "binary_expression":
+            operator = next((child for child in node.children if not child.is_named and _node_text(source_bytes, child) == "%"), None)
+            if operator is not None and node.named_children:
+                left = node.named_children[0]
+                if _solidity_tree_contains_block_entropy(left, source_bytes):
+                    return node
+        elif node.type == "array_access":
+            children = node.named_children
+            if len(children) >= 2 and _solidity_tree_contains_block_entropy(children[1], source_bytes):
+                return node
+    return None
+
+
+def _solidity_insecure_randomness_issues(source: str) -> list[ForeignSafetyIssue]:
+    tree, source_bytes = tree_sitter_extract.parse(source, "solidity")
+    if tree is None or source_bytes is None:
+        return []
+    issues: list[ForeignSafetyIssue] = []
+    for function_node in [node for node in _tree_nodes(tree.root_node) if node.type == "function_definition"]:
+        if not _solidity_entropy_selection_witness(function_node, source_bytes):
+            continue
+        expression = _solidity_entropy_selection_expression(function_node, source_bytes)
+        if expression is None:
+            continue
+        name_node = function_node.child_by_field_name("name")
+        function_name = _node_text(source_bytes, name_node) if name_node is not None else "<unknown>"
+        line = expression.start_point[0] + 1
+        issues.append(ForeignSafetyIssue(
+            function_name=function_name,
+            message=(
+                f"Solidity function `{function_name}` derives random winner selection "
+                f"from predictable block entropy at line {line}"
+            ),
+            line=line,
+        ))
+    return issues
+
+
+def _insecure_randomness_issues(source: str, language: str) -> list[ForeignSafetyIssue]:
+    if language == "python":
+        return _python_insecure_randomness_issues(source)
+    if language == "go":
+        return _go_insecure_randomness_issues(source)
+    if language == "typescript":
+        return _typescript_insecure_randomness_issues(source)
+    return []
+
+
 def _timing_credential_issues(source: str, language: str) -> list[ForeignSafetyIssue]:
     if language == "go":
         return _go_timing_credential_issues(source)
@@ -1010,7 +1453,12 @@ def _hardcoded_secret_issues(source: str, language: str) -> list[ForeignSafetyIs
 def _with_hardcoded_secret_issues(
     issues: list[ForeignSafetyIssue], source: str, language: str
 ) -> list[ForeignSafetyIssue]:
-    return [*issues, *_hardcoded_secret_issues(source, language), *_timing_credential_issues(source, language)]
+    return [
+        *issues,
+        *_hardcoded_secret_issues(source, language),
+        *_timing_credential_issues(source, language),
+        *_insecure_randomness_issues(source, language),
+    ]
 
 
 def _is_generated_source(source: str) -> bool:
@@ -10167,6 +10615,7 @@ def _detect_solidity_contract_issues(
                     )
                 )
     issues.extend(_solidity_unchecked_call_issues(source))
+    issues.extend(_solidity_insecure_randomness_issues(source))
     return issues
 
 def _solidity_function_is_externally_callable(attrs: str) -> bool:

@@ -296,3 +296,34 @@ def test_unchecked_call_confidence_rejects_wrapped_diagnostics() -> None:
     )
 
     assert result.findings[0]["confidence"] == "medium"
+
+
+def test_insecure_randomness_confidence_projection_is_exact_and_selective() -> None:
+    result = _finalize(
+        success=False,
+        verification_status="unverifiable",
+        verification_violations=[
+            "Python function `make_share_token` generates credential material with direct weak randomness at line 25",
+            "Go function `loginHandler` generates credential material from a timestamp at line 34",
+            "Solidity function `drawWinner` derives random winner selection from predictable block entropy at line 6",
+            "TypeScript function `generateCode` generates a lookup capability with direct weak randomness at line 36",
+        ],
+    )
+
+    rows = {row["message"]: row for row in result.findings}
+    assert rows["Python function `make_share_token` generates credential material with direct weak randomness at line 25"]["confidence"] == "high"
+    assert rows["Go function `loginHandler` generates credential material from a timestamp at line 34"]["confidence"] == "high"
+    assert rows["Solidity function `drawWinner` derives random winner selection from predictable block entropy at line 6"]["confidence"] == "high"
+    assert rows["TypeScript function `generateCode` generates a lookup capability with direct weak randomness at line 36"]["confidence"] == "medium"
+
+
+def test_insecure_randomness_confidence_rejects_wrapped_diagnostics() -> None:
+    result = _finalize(
+        success=False,
+        verification_status="unverifiable",
+        verification_violations=[
+            "z3 diagnostic: Python function `make_share_token` generates credential material with direct weak randomness at line 25",
+        ],
+    )
+
+    assert result.findings[0]["confidence"] == "medium"
