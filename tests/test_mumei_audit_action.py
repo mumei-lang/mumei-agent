@@ -884,6 +884,21 @@ def test_verify_downloaded_action_artifact_accepts_unwritten_proof_and_sarif_as_
     assert completed.returncode == 0, completed.stderr
 
 
+def test_verify_downloaded_action_artifact_rejects_written_claim_without_file_metadata(tmp_path: Path) -> None:
+    for claim_name in ("proof_certificate", "sarif"):
+        artifact = tmp_path / f"evidence-{claim_name}"
+        _write_downloaded_action_artifact(artifact)
+        execution_path = artifact / "migration-execution" / "migration_execution.json"
+        execution = json.loads(execution_path.read_text(encoding="utf-8"))
+        execution["candidates"][0]["verification"][claim_name] = {"written": True, "path": None, "sha256": None}
+        execution_path.write_text(json.dumps(execution), encoding="utf-8")
+
+        completed = _run_downloaded_artifact_verifier(artifact)
+
+        assert completed.returncode != 0
+        assert "written claim is missing generated artifact metadata" in completed.stderr
+
+
 def test_verify_downloaded_action_artifact_rejects_candidate_operational_error(tmp_path: Path) -> None:
     artifact = tmp_path / "evidence"
     _write_downloaded_action_artifact(artifact, state="operational_error")

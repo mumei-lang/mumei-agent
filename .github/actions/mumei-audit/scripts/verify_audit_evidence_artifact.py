@@ -138,6 +138,8 @@ def _validate_written_claim(
         return False
     if written is not True:
         raise ArtifactVerificationError(f"{label} claim is missing written metadata")
+    if claim.get("path") is None and claim.get("sha256") is None:
+        raise ArtifactVerificationError(f"{label} written claim is missing generated artifact metadata")
     return _validate_file_claim(claim, label=label, original_root_text=original_root_text, generated_root=generated_root)
 
 
