@@ -11097,7 +11097,35 @@ contract Math {
     }
 }
 '''
-    for name, source in (("fixed_transfer_from", fixed_transfer_from), ("increment_only", increment_only), ("no_arithmetic", no_arithmetic), ("checked_arithmetic", checked_arithmetic)):
+    require_guarded_subtraction = '''
+pragma solidity ^0.8.0;
+contract Vault {
+    function sub(uint256 a, uint256 b) external pure returns (uint256) {
+        require(a >= b);
+        unchecked { return a - b; }
+    }
+}
+'''
+    require_guarded_compound = '''
+pragma solidity ^0.8.0;
+contract Vault {
+    function sub(uint256 a, uint256 b) external pure returns (uint256) {
+        require(a >= b);
+        unchecked { a -= b; }
+        return a;
+    }
+}
+'''
+    require_guarded_addition = '''
+pragma solidity ^0.8.0;
+contract Vault {
+    function add(uint256 a, uint256 b) external pure returns (uint256) {
+        require(a <= type(uint256).max - b);
+        unchecked { return a + b; }
+    }
+}
+'''
+    for name, source in (("fixed_transfer_from", fixed_transfer_from), ("increment_only", increment_only), ("no_arithmetic", no_arithmetic), ("checked_arithmetic", checked_arithmetic), ("require_guarded_subtraction", require_guarded_subtraction), ("require_guarded_compound", require_guarded_compound), ("require_guarded_addition", require_guarded_addition)):
         assert not [i for i in _detect_safety_issues(source, "solidity") if "unchecked arithmetic bounds invariant" in i.message], name
 
 
