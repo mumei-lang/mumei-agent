@@ -1097,17 +1097,33 @@ def _python_weak_random_only_expression(value: ast.AST | None, random_call: ast.
 
 
 _PYTHON_NONCREDENTIAL_METADATA_KEY_PARTS = frozenset({
+    "after",
+    "age",
+    "attempt",
+    "attempts",
     "backoff",
+    "cooldown",
+    "count",
+    "deadline",
     "delay",
     "duration",
     "expiration",
+    "expire",
     "expires",
     "expiry",
     "interval",
     "jitter",
+    "lifetime",
+    "period",
     "retry",
+    "seconds",
+    "sleep",
+    "time",
     "timeout",
+    "timestamp",
     "ttl",
+    "validity",
+    "wait",
 })
 
 
