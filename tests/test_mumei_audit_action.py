@@ -1230,13 +1230,13 @@ def test_verify_downloaded_action_artifact_rejects_symlink_and_escaping_claim(tm
     assert "outside the generated artifact directory" in completed.stderr
 
 
-def _write_summary_run(tmp_path: Path, audit: dict) -> str:
+def _write_summary_run(tmp_path: Path, audit: dict, extra_env: dict | None = None) -> str:
     audit_json = tmp_path / "audit.json"
     audit_json.write_text(json.dumps(audit), encoding="utf-8")
     timing = tmp_path / "timing"
     timing.mkdir(exist_ok=True)
     summary = tmp_path / "summary.md"
-    env = {**os.environ, "GITHUB_STEP_SUMMARY": str(summary)}
+    env = {**os.environ, "GITHUB_STEP_SUMMARY": str(summary), **(extra_env or {})}
     subprocess.run(
         [
             sys.executable,
@@ -1324,3 +1324,42 @@ def test_summarize_audit_without_findings_key_unchanged(tmp_path: Path) -> None:
     )
     assert "### findings" not in text
     assert "plain violation" in text
+
+
+def test_summarize_audit_strips_runner_absolute_workspace_paths(tmp_path: Path) -> None:
+    workspace = "/home/runner/work/mumei-demo/mumei-demo"
+    row = _finding("new", "runner shape finding")
+    row["source_file"] = f"{workspace}/src/payment_ledger.py"
+    text = _write_summary_run(
+        tmp_path,
+        {"verification_status": "refuted", "findings": [row]},
+        extra_env={"GITHUB_WORKSPACE": workspace},
+    )
+    assert "src/payment_ledger.py" in text
+    assert "/home/runner/work" not in text
+    assert workspace not in text
+
+
+def test_summarize_audit_redacts_outside_workspace_absolute_paths(tmp_path: Path) -> None:
+    row = _finding("new", "outside path finding")
+    row["source_file"] = "/opt/other-checkout/lib/deep/module.py"
+    text = _write_summary_run(
+        tmp_path,
+        {"verification_status": "refuted", "findings": [row]},
+        extra_env={"GITHUB_WORKSPACE": "/home/runner/work/mumei-demo/mumei-demo"},
+    )
+    assert "module.py" in text
+    assert "/opt/other-checkout" not in text
+
+
+def test_summarize_audit_tolerates_missing_or_nonstring_source_file(tmp_path: Path) -> None:
+    missing = _finding("new", "no source file finding")
+    del missing["source_file"]
+    none_row = _finding("suppressed", "none source file finding")
+    none_row["source_file"] = None
+    text = _write_summary_run(
+        tmp_path,
+        {"verification_status": "refuted", "findings": [missing, none_row]},
+    )
+    assert "no source file finding" in text
+    assert "none source file finding" in text

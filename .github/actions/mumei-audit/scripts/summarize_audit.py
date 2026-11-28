@@ -104,12 +104,23 @@ def main() -> int:
             ]
         )
 
+        def _display_path(location: object) -> str:
+            """Workspace-relative display path; never a runner absolute path."""
+            if not isinstance(location, str) or not location:
+                return ""
+            if not location.startswith("/"):
+                return location
+            workspace = os.environ.get("GITHUB_WORKSPACE") or ""
+            if workspace and (location == workspace or location.startswith(workspace.rstrip("/") + "/")):
+                return location[len(workspace.rstrip("/")) + 1 :] or Path(location).name
+            return Path(location).name
+
         def _finding_bullets(rows: list[object], *, limit: int) -> list[str]:
             bullets = []
             for row in rows[:limit]:
                 if isinstance(row, dict):
                     message = str(row.get("message", "")).replace("\n", " ")[:500]
-                    location = row.get("source_file") or ""
+                    location = _display_path(row.get("source_file"))
                     line_no = row.get("line")
                     where = f" ({location}:{line_no})" if location and line_no else (f" ({location})" if location else "")
                     bullets.append(f"- {message}{where}")
