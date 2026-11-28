@@ -1,7 +1,12 @@
 """Tests for the native-first verify-distribution orchestrator."""
 
 import json
+import os
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from agent.native_bundle import FILE_MEMBERS, RECORD_FILE
 from agent.verify_distribution import (
@@ -386,3 +391,51 @@ def test_cli_help_mentions_trusted_runtime_boundary():
     compact = " ".join(help_text.split())
     assert "Off by default" in compact
     assert "trusted" in compact
+
+
+@pytest.fixture
+def real_core():
+    path = os.environ.get("MUMEI_BIN")
+    if path and Path(path).is_absolute() and Path(path).is_file():
+        return path
+    pytest.skip("set MUMEI_BIN to an absolute trusted Core executable")
+
+
+@pytest.mark.integration
+def test_real_core_incomplete_runtime_pins_are_inconclusive(tmp_path, capsys, real_core):
+    source = _write_source(tmp_path)
+    bundle = tmp_path / "bundle"
+    built = subprocess.run(
+        [real_core, "native-bundle", "build", str(source), "-o", str(bundle)],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if built.returncode != 0:
+        if "unsupported host for first native profile" in built.stderr:
+            pytest.skip("native-bundle build needs linux/x86_64")
+        pytest.fail(f"native-bundle build failed: {built.stderr}")
+
+    for mode in ("partial", "absent"):
+        mutated = tmp_path / f"bundle-{mode}"
+        shutil.copytree(bundle, mutated)
+        record_path = mutated / RECORD_FILE
+        record = json.loads(record_path.read_text())
+        if mode == "partial":
+            record["link_build"]["expected_stdout_sha256"] = None
+            record["link_build"]["expected_stderr_sha256"] = None
+        else:
+            record["link_build"]["expected_exit_status"] = None
+            record["link_build"]["expected_stdout_sha256"] = None
+            record["link_build"]["expected_stderr_sha256"] = None
+        record_path.write_text(json.dumps(record))
+        import hashlib
+
+        build_id = hashlib.sha256(record_path.read_bytes()).hexdigest()
+        argv = _argv(Path(real_core), mutated, source, "--enable-runtime-observations")
+        argv[argv.index("--expected-build-id") + 1] = build_id
+        code, out, _ = _run(capsys, argv)
+        assert code == 3
+        role = json.loads(out)["roles"]["runtime_observation"]
+        assert role["status"] == "inconclusive"
+        assert role["reason"] == "core_inconclusive"
