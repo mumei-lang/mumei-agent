@@ -8599,8 +8599,15 @@ fn f(total: i64, xs: &[i64], config: Config) -> i64 {
     assert [i for i in _detect_safety_issues(loop_reassigned, "rust") if "divide" in i.message]
     assert not [i for i in _detect_safety_issues(fixed_array, "rust") if "divide" in i.message]
     assert [i for i in _detect_safety_issues(tuple_shadow, "rust") if "divide" in i.message]
+    mutable_reborrow = """fn f(total: i64, mut xs: &[i64]) -> i64 {
+    if xs.is_empty() { return 0 }
+    std::mem::replace(&mut xs, &[]);
+    total / xs.len() as i64
+}
+"""
     assert not [i for i in _detect_safety_issues(write_after_division, "rust") if "divide" in i.message]
     assert not [i for i in _detect_safety_issues(struct_field_not_binding, "rust") if "divide" in i.message]
+    assert [i for i in _detect_safety_issues(mutable_reborrow, "rust") if "divide" in i.message]
 
 
 def test_rust_arbitrary_member_divisor_remains_conservative() -> None:

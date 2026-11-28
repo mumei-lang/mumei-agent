@@ -2192,6 +2192,15 @@ def _rust_collection_len_division_issues(
             node.child_by_field_name("pattern")
         ):
             positions.append(node.start_byte)
+        if node.type == "reference_expression":
+            value = node.child_by_field_name("value")
+            if (
+                value is not None
+                and value.type == "identifier"
+                and text(value) == receiver
+                and any(child.type == "mutable_specifier" for child in node.children)
+            ):
+                positions.append(node.start_byte)
         for child in node.named_children:
             positions.extend(receiver_write_positions(child, receiver, start))
         return positions
