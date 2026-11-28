@@ -556,6 +556,7 @@ def _is_hardcoded_secret_name(name: str) -> bool:
         "variable",
         "param",
         "parameter",
+        "type",
     }:
         return False
     return bool(
