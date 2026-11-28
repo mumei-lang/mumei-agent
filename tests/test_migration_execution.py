@@ -1222,3 +1222,156 @@ def test_real_mumei_erosion_recheck_is_recorded_for_changed_contract_text(tmp_pa
     assert erosion["status"] == "passed"
     assert erosion["checked"] is True
     assert erosion["atoms"] == [{"name": "withdraw", "status": "preserved"}]
+
+
+def test_migration_execution_dedupes_aliases_of_the_same_definition(tmp_path: Path) -> None:
+    source = tmp_path / "groups.py"
+    source.write_text(
+        "class Resolver:\n"
+        "    def resolve(self, group: str) -> str:\n"
+        "        return group\n",
+        encoding="utf-8",
+    )
+    result = _result(
+        source,
+        [
+            _hint("resolve", "atom resolve(x: i64) -> i64 {\n    requires: x >= 0;\n    ensures: result >= 0;\n    body: {\n        x\n    }\n}"),
+            _hint("Resolver.resolve", "atom resolve(x: i64) -> i64 {\n    requires: x >= 0;\n    ensures: result >= 0;\n    body: {\n        x\n    }\n}"),
+        ],
+    )
+    output = tmp_path / "execution.json"
+
+    report = build_migration_execution(result, output_path=output, mumei_client=FakeVerifyClient())
+
+    assert len(report["candidates"]) == 1
+    candidate = report["candidates"][0]
+    assert candidate["function_name"] == "Resolver.resolve"
+    reason = candidate["selection"]["reason"]
+    assert "Resolver.resolve violates the extracted contract" in reason
+    assert "duplicate hint for `resolve` resolving to the same definition" in reason
+
+
+def test_migration_execution_keeps_legit_same_leaf_module_function_and_method(tmp_path: Path) -> None:
+    source = tmp_path / "both.py"
+    source.write_text(
+        "def resolve(group: str) -> str:\n"
+        "    return group\n"
+        "\n"
+        "class Resolver:\n"
+        "    def resolve(self, group: str) -> str:\n"
+        "        return group.upper()\n",
+        encoding="utf-8",
+    )
+    result = _result(
+        source,
+        [
+            _hint("resolve", "atom resolve_a(x: i64) -> i64 {\n    requires: x >= 0;\n    ensures: result >= 0;\n    body: {\n        x\n    }\n}"),
+            _hint("Resolver.resolve", "atom resolve_b(x: i64) -> i64 {\n    requires: x >= 0;\n    ensures: result >= 0;\n    body: {\n        x\n    }\n}"),
+        ],
+    )
+    output = tmp_path / "execution.json"
+
+    report = build_migration_execution(result, output_path=output, mumei_client=FakeVerifyClient())
+
+    # The leaf `resolve` is defined twice in the file, so the unqualified hint
+    # must not resolve; nothing may be deduplicated on a guess.
+    assert len(report["candidates"]) == 2
+    assert {c["function_name"] for c in report["candidates"]} == {"resolve", "Resolver.resolve"}
+
+
+def test_migration_execution_keeps_same_name_methods_in_different_classes(tmp_path: Path) -> None:
+    source = tmp_path / "two_classes.py"
+    source.write_text(
+        "class Alpha:\n"
+        "    def run(self) -> int:\n"
+        "        return 1\n"
+        "\n"
+        "class Beta:\n"
+        "    def run(self) -> int:\n"
+        "        return 2\n",
+        encoding="utf-8",
+    )
+    result = _result(
+        source,
+        [
+            _hint("Alpha.run", "atom run_a(x: i64) -> i64 {\n    requires: x >= 0;\n    ensures: result >= 0;\n    body: {\n        x\n    }\n}"),
+            _hint("Beta.run", "atom run_b(x: i64) -> i64 {\n    requires: x >= 0;\n    ensures: result >= 0;\n    body: {\n        x\n    }\n}"),
+        ],
+    )
+    output = tmp_path / "execution.json"
+
+    report = build_migration_execution(result, output_path=output, mumei_client=FakeVerifyClient())
+
+    assert len(report["candidates"]) == 2
+    assert {c["function_name"] for c in report["candidates"]} == {"Alpha.run", "Beta.run"}
+
+
+def test_migration_execution_unresolvable_names_are_never_deduped(tmp_path: Path) -> None:
+    source = tmp_path / "simple.py"
+    source.write_text("def other(x: int) -> int:\n    return x\n", encoding="utf-8")
+    result = _result(
+        source,
+        [
+            _hint("missing_one", "atom m1(x: i64) -> i64 {\n    requires: x >= 0;\n    ensures: result >= 0;\n    body: {\n        x\n    }\n}"),
+            _hint("missing_two", "atom m2(x: i64) -> i64 {\n    requires: x >= 0;\n    ensures: result >= 0;\n    body: {\n        x\n    }\n}"),
+        ],
+    )
+    output = tmp_path / "execution.json"
+
+    report = build_migration_execution(result, output_path=output, mumei_client=FakeVerifyClient())
+
+    assert len(report["candidates"]) == 2
+
+
+def test_migration_execution_keeps_distinct_skeletons_for_the_same_definition(tmp_path: Path) -> None:
+    source = tmp_path / "groups.py"
+    source.write_text(
+        "class Resolver:\n"
+        "    def resolve(self, group: str) -> str:\n"
+        "        return group\n",
+        encoding="utf-8",
+    )
+    skel_a = "atom resolve(x: i64) -> i64 {\n    requires: x >= 0;\n    ensures: result >= 0;\n    body: {\n        x\n    }\n}"
+    skel_b = skel_a[:-1]  # one trailing newline removed: distinct skeleton text
+    result = _result(
+        source,
+        [_hint("resolve", skel_a), _hint("Resolver.resolve", skel_b)],
+    )
+    output = tmp_path / "execution.json"
+
+    report = build_migration_execution(result, output_path=output, mumei_client=FakeVerifyClient())
+
+    # Same definition span, but the skeletons differ by one character: both
+    # candidates carry distinct review evidence and must not be merged.
+    assert len(report["candidates"]) == 2
+    assert {c["function_name"] for c in report["candidates"]} == {"resolve", "Resolver.resolve"}
+
+
+def test_migration_execution_never_merges_duplicate_qualified_definitions(tmp_path: Path) -> None:
+    source = tmp_path / "branched.py"
+    source.write_text(
+        "cond = True\n"
+        "if cond:\n"
+        "    class A:\n"
+        "        def f(self) -> int:\n"
+        "            return 1\n"
+        "else:\n"
+        "    class A:\n"
+        "        def f(self) -> int:\n"
+        "            return 2\n",
+        encoding="utf-8",
+    )
+    result = _result(
+        source,
+        [
+            _hint("A.f", "atom af1(x: i64) -> i64 {\n    requires: x >= 0;\n    ensures: result >= 0;\n    body: {\n        x\n    }\n}"),
+            _hint("A.f", "atom af1(x: i64) -> i64 {\n    requires: x >= 0;\n    ensures: result >= 0;\n    body: {\n        x\n    }\n}"),
+        ],
+    )
+    output = tmp_path / "execution.json"
+
+    report = build_migration_execution(result, output_path=output, mumei_client=FakeVerifyClient())
+
+    # `A.f` is defined twice in the conditional branches, so even identical
+    # qualified hints must stay unresolved and unmerged.
+    assert len(report["candidates"]) == 2
