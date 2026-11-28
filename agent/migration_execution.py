@@ -337,6 +337,219 @@ def _extract_mm_clauses(code: str, keyword: str) -> list[str]:
     return clauses
 
 
+def _normalize_conjunct_text(text: str) -> str:
+    out: list[str] = []
+    in_string = False
+    pending_space = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if in_string:
+            out.append(char)
+            if char == "\\" and index + 1 < len(text):
+                index += 1
+                out.append(text[index])
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            if pending_space and out:
+                out.append(" ")
+            pending_space = False
+            in_string = True
+            out.append(char)
+        elif char.isspace():
+            pending_space = bool(out)
+        else:
+            if pending_space:
+                out.append(" ")
+            pending_space = False
+            out.append(char)
+        index += 1
+    return "".join(out).strip()
+
+
+def _has_top_level_or(text: str) -> bool:
+    depth = 0
+    in_string = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if in_string:
+            if char == "\\":
+                index += 2
+                continue
+            if char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth = max(0, depth - 1)
+        elif depth == 0 and text.startswith("||", index):
+            return True
+        index += 1
+    return False
+
+
+def _normalized_top_level_conjuncts(clauses: list[str]) -> list[str]:
+    parts: list[str] = []
+    for clause in clauses:
+        if _has_top_level_or(clause):
+            parts.append(_normalize_conjunct_text(clause))
+            continue
+        start = 0
+        index = 0
+        depth = 0
+        in_string = False
+        while index < len(clause):
+            char = clause[index]
+            if in_string:
+                if char == "\\":
+                    index += 2
+                    continue
+                if char == '"':
+                    in_string = False
+                index += 1
+                continue
+            if char == '"':
+                in_string = True
+            elif char in "([{":
+                depth += 1
+            elif char in ")]}":
+                depth = max(0, depth - 1)
+            elif depth == 0 and clause.startswith("&&", index):
+                parts.append(_normalize_conjunct_text(clause[start:index]))
+                index += 2
+                start = index
+                continue
+            index += 1
+        parts.append(_normalize_conjunct_text(clause[start:]))
+    return [part for part in parts if part]
+
+
+def _conjunct_delta(original: list[str], final: list[str]) -> dict[str, list[str]]:
+    original_parts = _normalized_top_level_conjuncts(original)
+    final_parts = _normalized_top_level_conjuncts(final)
+    remaining = list(original_parts)
+    added: list[str] = []
+    for part in final_parts:
+        if part in remaining:
+            remaining.remove(part)
+        else:
+            added.append(part)
+    return {"added": sorted(added), "removed": sorted(remaining)}
+
+
+def _initial_contract_erosion(reason: str) -> dict[str, object]:
+    return {
+        "status": "not_checked",
+        "checked": False,
+        "reason": reason,
+        "summary": None,
+        "source": "migration_execution_core_recheck",
+        "atom_count": 0,
+        "eroded_atom_count": 0,
+        "atoms": [],
+    }
+
+
+def _contract_erosion_check(original_text: str, final_text: str, *, mumei_client) -> dict[str, object]:
+    if final_text == original_text:
+        result = _initial_contract_erosion("contract text is unchanged")
+        result["status"] = "skipped_no_change"
+        return result
+    if mumei_client is None or not hasattr(mumei_client, "erosion_check"):
+        result = _initial_contract_erosion("mumei erosion check is unavailable")
+        result["status"] = "unavailable"
+        return result
+    if migration_text_has_sensitive_literals(original_text) or migration_text_has_sensitive_literals(final_text):
+        result = _initial_contract_erosion("sensitive contract content suppressed before erosion comparison")
+        return result
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="mumei-migration-erosion-") as temp_dir:
+            temp_path = Path(temp_dir)
+            baseline_path = temp_path / "baseline.mm"
+            candidate_path = temp_path / "candidate.mm"
+            baseline_path.write_text(original_text, encoding="utf-8")
+            candidate_path.write_text(final_text, encoding="utf-8")
+            outcome = mumei_client.erosion_check(str(candidate_path), str(baseline_path))
+    except Exception as exc:
+        result = _initial_contract_erosion("erosion check raised before a structured result was available")
+        result["status"] = "operational_error"
+        result["summary"] = type(exc).__name__
+        return result
+
+    if not isinstance(outcome, dict):
+        result = _initial_contract_erosion("erosion check returned no structured result")
+        result["status"] = "malformed"
+        return result
+    returncode = outcome.get("returncode")
+    report = outcome.get("report")
+    if returncode == 2:
+        result = _initial_contract_erosion("mumei erosion check is unavailable in this toolchain")
+        result["status"] = "unavailable"
+        return result
+    if returncode == 4:
+        result = _initial_contract_erosion("original or final contract text could not be checked")
+        result["status"] = "malformed"
+        return result
+    if not isinstance(report, dict) or not isinstance(report.get("atoms"), list):
+        result = _initial_contract_erosion("erosion check did not return a structured erosion report")
+        result["status"] = "malformed"
+        return result
+
+    atoms = []
+    hard_failure = False
+    inconclusive = False
+    eroded = 0
+    hard_statuses = {"pre_weakened", "post_weakened", "missing", "signature_mismatch", "trust_added", "effects_widened"}
+    for atom in report["atoms"][:20]:
+        if not isinstance(atom, dict):
+            continue
+        status = str(atom.get("status") or "unknown")
+        name = redact_secrets(str(atom.get("name") or "<unknown>"))
+        atoms.append({"name": name, "status": status})
+    for atom in report["atoms"]:
+        if not isinstance(atom, dict):
+            continue
+        status = str(atom.get("status") or "")
+        if status in hard_statuses:
+            hard_failure = True
+            eroded += 1
+        elif status == "inconclusive":
+            inconclusive = True
+            eroded += 1
+
+    result = _initial_contract_erosion("erosion check completed")
+    result.update({
+        "checked": True,
+        "atom_count": len(report["atoms"]),
+        "eroded_atom_count": eroded,
+        "atoms": atoms,
+    })
+    if returncode == 0 and report.get("status") == "pass":
+        result["status"] = "passed"
+        result["summary"] = "contract erosion check passed"
+    elif hard_failure:
+        result["status"] = "failed"
+        result["summary"] = "contract erosion detected"
+    elif inconclusive:
+        result["status"] = "inconclusive"
+        result["summary"] = "contract erosion check inconclusive"
+    elif report.get("status") == "fail":
+        result["status"] = "failed"
+        result["summary"] = "contract erosion detected"
+    else:
+        result["status"] = "malformed"
+        result["checked"] = False
+        result["reason"] = "erosion report status was inconsistent with the command result"
+    return result
+
+
 def _extracted_contract(skeleton: str) -> dict[str, object]:
     code = "\n".join(_strip_mm_comments(skeleton, mask_strings=False))
     masked = "\n".join(_strip_mm_comments(skeleton, mask_strings=True))
@@ -660,6 +873,7 @@ def build_migration_execution(
                 "entries": [],
             },
             "contract_provenance": {},
+            "contract_erosion": _initial_contract_erosion("contract erosion check has not run"),
             "evidence_blockers": [
                 item
                 for item in feasibility_blockers
@@ -719,6 +933,8 @@ def build_migration_execution(
                     original_contract["requires"] != contract["requires"]
                     or original_contract["ensures"] != contract["ensures"]
                 ),
+                "requires_delta": _conjunct_delta(original_contract["requires"], contract["requires"]),
+                "ensures_delta": _conjunct_delta(original_contract["ensures"], contract["ensures"]),
             }
             behavior_entries = _behavior_entries(file_result, function_name)
             candidate["unbound_audit_diagnostics"] = {
@@ -742,6 +958,7 @@ def build_migration_execution(
                 candidate["execution_state"] = "blocked"
                 _write_partial(output_path, report)
                 continue
+            candidate["contract_erosion"] = _contract_erosion_check(original_text, final_text, mumei_client=mumei_client)
             stem = _safe_stem(function_name) + "-" + _sha256_text(final_text)[:12]
             mm_path = artifact_dir / f"{stem}.mm"
             suffix = 1
