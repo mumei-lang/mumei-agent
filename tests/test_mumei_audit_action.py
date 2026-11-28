@@ -1228,3 +1228,99 @@ def test_verify_downloaded_action_artifact_rejects_symlink_and_escaping_claim(tm
     completed = _run_downloaded_artifact_verifier(artifact)
     assert completed.returncode != 0
     assert "outside the generated artifact directory" in completed.stderr
+
+
+def _write_summary_run(tmp_path: Path, audit: dict) -> str:
+    audit_json = tmp_path / "audit.json"
+    audit_json.write_text(json.dumps(audit), encoding="utf-8")
+    timing = tmp_path / "timing"
+    timing.mkdir(exist_ok=True)
+    summary = tmp_path / "summary.md"
+    env = {**os.environ, "GITHUB_STEP_SUMMARY": str(summary)}
+    subprocess.run(
+        [
+            sys.executable,
+            str(SUMMARY_SCRIPT),
+            "--audit-json",
+            str(audit_json),
+            "--exit-code",
+            "0",
+            "--timing-dir",
+            str(timing),
+        ],
+        env=env,
+        check=True,
+    )
+    return summary.read_text(encoding="utf-8")
+
+
+def _finding(baseline: str, message: str) -> dict:
+    return {
+        "schema": "mumei.audit-findings/v1",
+        "category": "code",
+        "severity": "warning",
+        "confidence": "high",
+        "verification_basis": "z3",
+        "message": message,
+        "source_file": "src/payment_ledger.py",
+        "line": 12,
+        "fingerprint": "0" * 64,
+        "baseline": baseline,
+    }
+
+
+def test_summarize_audit_baseline_aware_findings_empty_baseline(tmp_path: Path) -> None:
+    text = _write_summary_run(
+        tmp_path,
+        {
+            "verification_status": "refuted",
+            "findings": [_finding("new", "first active finding"), _finding("new", "second active finding")],
+            "verification_violations": ["division by zero is reachable"],
+        },
+    )
+    assert "### findings" in text
+    assert "Active findings: `2`; suppressed by baseline: `0`" in text
+    assert "first active finding" in text
+    assert "do not reflect baseline suppression policy" in text
+    assert "Suppressed by baseline (still reported, not deleted)" not in text
+
+
+def test_summarize_audit_baseline_aware_findings_adopted_baseline(tmp_path: Path) -> None:
+    text = _write_summary_run(
+        tmp_path,
+        {
+            "verification_status": "refuted",
+            "findings": [_finding("suppressed", "now suppressed finding"), _finding("suppressed", "second suppressed finding")],
+        },
+    )
+    assert "Active findings: `0`; suppressed by baseline: `2`" in text
+    assert "Suppressed by baseline (still reported, not deleted)" in text
+    assert "now suppressed finding" in text
+    assert "- Active:" not in text
+
+
+def test_summarize_audit_findings_backward_compatible_without_baseline_key(tmp_path: Path) -> None:
+    legacy = _finding("new", "legacy row")
+    del legacy["baseline"]
+    text = _write_summary_run(
+        tmp_path,
+        {
+            "verification_status": "refuted",
+            "findings": [legacy],
+            "verification_violations": ["legacy violation"],
+        },
+    )
+    assert "Active findings: `1`; suppressed by baseline: `0`" in text
+    assert "legacy violation" in text
+
+
+def test_summarize_audit_without_findings_key_unchanged(tmp_path: Path) -> None:
+    text = _write_summary_run(
+        tmp_path,
+        {
+            "verification_status": "refuted",
+            "verification_violations": ["plain violation"],
+        },
+    )
+    assert "### findings" not in text
+    assert "plain violation" in text

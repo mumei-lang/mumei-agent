@@ -92,13 +92,53 @@ def main() -> int:
                 lines.append("- Consumer policy: candidate `operational_error` fails the action; `blocked` and `ready_for_human_review` do not.")
         if migration.get("error"):
             lines.append(f"- Operational error: {migration['error']}")
+    findings = audit.get("findings") if isinstance(audit.get("findings"), list) else []
+    if findings:
+        active = [f for f in findings if not isinstance(f, dict) or f.get("baseline") != "suppressed"]
+        suppressed = [f for f in findings if isinstance(f, dict) and f.get("baseline") == "suppressed"]
+        lines.extend(
+            [
+                "",
+                "### findings",
+                f"- Active findings: `{len(active)}`; suppressed by baseline: `{len(suppressed)}`",
+            ]
+        )
+
+        def _finding_bullets(rows: list[object], *, limit: int) -> list[str]:
+            bullets = []
+            for row in rows[:limit]:
+                if isinstance(row, dict):
+                    message = str(row.get("message", "")).replace("\n", " ")[:500]
+                    location = row.get("source_file") or ""
+                    line_no = row.get("line")
+                    where = f" ({location}:{line_no})" if location and line_no else (f" ({location})" if location else "")
+                    bullets.append(f"- {message}{where}")
+                else:
+                    bullets.append("- " + str(row).replace("\n", " ")[:500])
+            if len(rows) > limit:
+                bullets.append(f"- … {len(rows) - limit} more")
+            return bullets
+
+        if active:
+            lines.extend(["- Active:", *_finding_bullets(active, limit=5)])
+        if suppressed:
+            lines.extend(["- Suppressed by baseline (still reported, not deleted):", *_finding_bullets(suppressed, limit=5)])
     violations = audit.get("verification_violations") if isinstance(audit.get("verification_violations"), list) else []
     gaps = audit.get("cross_validation_gaps") if isinstance(audit.get("cross_validation_gaps"), list) else []
     next_steps = audit.get("next_steps") if isinstance(audit.get("next_steps"), list) else []
+    raw_note_emitted = False
+
+    def _raw_note() -> list[str]:
+        nonlocal raw_note_emitted
+        if raw_note_emitted:
+            return []
+        raw_note_emitted = True
+        return ["", "_Raw audit keys below do not reflect baseline suppression policy; see the findings section for baseline-aware counts._"]
+
     if violations:
-        lines.extend(["", "### verification_violations", *_bullet_lines(violations, limit=5)])
+        lines.extend([*_raw_note(), "", "### verification_violations", *_bullet_lines(violations, limit=5)])
     if gaps:
-        lines.extend(["", "### cross_validation_gaps", *_bullet_lines(gaps, limit=5)])
+        lines.extend([*_raw_note(), "", "### cross_validation_gaps", *_bullet_lines(gaps, limit=5)])
     if next_steps:
         lines.extend(["", "### next_steps", *_bullet_lines(next_steps, limit=5)])
     if not audit:
