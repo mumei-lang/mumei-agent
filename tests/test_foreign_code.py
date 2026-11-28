@@ -10972,3 +10972,27 @@ def test_split_index_medium_witnesses_reach_verifier_errors_without_index_detail
         assert _violation_confidence(hits[0]) == "medium"
         for value in forbidden:
             assert value not in hits[0]
+
+
+def test_split_index_guard_close_matches_balanced_brace_position() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import (
+        _balanced_brace_body,
+        _control_depths,
+    )
+
+    guard = 'if len(parts) < 2 {\n    if ok {\n        return ""\n    }\n    return ""\n}\n'
+    opening = guard.index("{")
+    block = _balanced_brace_body(guard, opening)
+    close_pos = opening + 1 + len(block)
+    assert guard[close_pos] == "}"
+    assert close_pos == len(guard) - 2
+    depths = _control_depths(guard)
+    assert depths[close_pos + 1] == depths[guard.index("if")]
+
+
+def test_split_index_guard_body_with_nested_braces_still_dominates_later_use() -> None:
+    go_nested_guard = '    parts := strings.Split(path, "/")\n    if len(parts) < 2 {\n        if ok {\n            return ""\n        }\n        return ""\n    }\n    return parts[1]\n'
+    rust_nested_guard = '    let parts: Vec<&str> = line.split(\',\').collect();\n    if parts.len() < 2 {\n        if ok {\n            return String::new();\n        }\n        return String::new();\n    }\n    parts[1].to_string()\n'
+    for language, body in (("go", go_nested_guard), ("rust", rust_nested_guard)):
+        hits = [i for i in _detect_safety_issues(body, language) if "positive literal index" in i.message]
+        assert not hits, (language, hits)
