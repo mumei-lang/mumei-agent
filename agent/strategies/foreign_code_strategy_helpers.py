@@ -1068,6 +1068,52 @@ def _python_function_own_nodes(function: ast.AST):
         stack.extend(ast.iter_child_nodes(node))
 
 
+def _python_ast_contains(root: ast.AST | None, needle: ast.AST) -> bool:
+    return root is not None and any(node is needle for node in ast.walk(root))
+
+
+def _python_return_credential_context(return_node: ast.Return, random_call: ast.AST, function_is_credential: bool) -> bool:
+    if not function_is_credential or not _python_ast_contains(return_node.value, random_call):
+        return False
+    value = return_node.value
+    if isinstance(value, ast.Dict):
+        for key, item in zip(value.keys, value.values, strict=True):
+            if (
+                isinstance(key, ast.Constant)
+                and isinstance(key.value, str)
+                and _has_strong_credential_name(key.value)
+                and _python_ast_contains(item, random_call)
+            ):
+                return True
+        return False
+    if isinstance(value, (ast.Tuple, ast.List, ast.Set)):
+        return False
+    allowed_names = {"random", "int", "str", "hex", "round"}
+    return not any(
+        isinstance(node, ast.Name) and node.id not in allowed_names
+        for node in ast.walk(value)
+    )
+
+
+def _python_assignment_credential_context(assign: ast.Assign, random_call: ast.AST) -> bool:
+    for target in assign.targets:
+        target_names = _python_target_names(target)
+        if not any(_has_strong_credential_name(name) for name in target_names):
+            continue
+        if isinstance(target, (ast.Tuple, ast.List)):
+            if not isinstance(assign.value, (ast.Tuple, ast.List)) or len(target.elts) != len(assign.value.elts):
+                continue
+            if any(
+                _python_ast_contains(value, random_call)
+                for target_element, value in zip(target.elts, assign.value.elts, strict=True)
+                if any(_has_strong_credential_name(name) for name in _python_target_names(target_element))
+            ):
+                return True
+        elif _python_ast_contains(assign.value, random_call):
+            return True
+    return False
+
+
 def _python_insecure_randomness_issues(source: str) -> list[ForeignSafetyIssue]:
     try:
         tree = ast.parse(source)
@@ -1097,13 +1143,9 @@ def _python_insecure_randomness_issues(source: str) -> list[ForeignSafetyIssue]:
             while cursor in parents and parents[cursor] is not function:
                 cursor = parents[cursor]
                 if isinstance(cursor, ast.Return):
-                    credential_context = function_is_credential
+                    credential_context = _python_return_credential_context(cursor, node, function_is_credential)
                 elif isinstance(cursor, ast.Assign):
-                    credential_context = any(
-                        _has_strong_credential_name(name)
-                        for target in cursor.targets
-                        for name in _python_target_names(target)
-                    )
+                    credential_context = _python_assignment_credential_context(cursor, node)
                 elif isinstance(cursor, ast.AnnAssign):
                     credential_context = any(
                         _has_strong_credential_name(name)

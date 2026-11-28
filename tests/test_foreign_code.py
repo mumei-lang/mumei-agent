@@ -10223,6 +10223,68 @@ def make_share_token() -> str:
     assert not [i for i in _detect_safety_issues(source, "python") if "weak randomness" in i.message]
 
 
+def test_python_insecure_randomness_collection_return_and_unpacking_precision() -> None:
+    negative_sources = [
+        '''
+import random
+import secrets
+
+def make_share_token():
+    return secrets.token_hex(16), random.random()
+''',
+        '''
+import random
+import secrets
+
+def make_share_token():
+    return {"token": secrets.token_hex(16), "retry_after": random.random()}
+''',
+        '''
+import random
+import secrets
+
+def make_share_token():
+    token, delay = secrets.token_hex(16), random.random()
+    return token
+''',
+        '''
+import random
+import secrets
+
+def make_share_token():
+    token = secrets.token_hex(16)
+    return token + str(random.random())
+''',
+    ]
+    positive_sources = [
+        '''
+import random
+
+def make_share_token():
+    return {"token": "%012x" % int(random.random() * (1 << 48)), "retry_after": 1}
+''',
+        '''
+import random
+
+def make_share_token():
+    token, delay = "%012x" % int(random.random() * (1 << 48)), 1
+    return token
+''',
+        '''
+import random
+
+def make_share_token():
+    token = delay = random.random()
+    return token
+''',
+    ]
+
+    for source in negative_sources:
+        assert not [i for i in _detect_safety_issues(source, "python") if "weak randomness" in i.message]
+    for source in positive_sources:
+        assert [i for i in _detect_safety_issues(source, "python") if "weak randomness" in i.message]
+
+
 def test_go_insecure_randomness_parallel_assignment_pairs_lhs_and_rhs() -> None:
     mixed_parallel = '''package auth
 import (
