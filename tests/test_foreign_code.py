@@ -9271,6 +9271,7 @@ def test_hardcoded_secret_negative_rhs_forms() -> None:
         ("python", 'ADMIN_TOKEN = "example-value"\n'),
         ("python", 'ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")\n'),
         ("python", 'ADMIN_TOKEN = "a" + "b"\n'),
+        ("python", 'ADMIN_TOKEN = "a" "b"\n'),
         ("go", 'package main\nconst adminToken = ""\nfunc main() {}\n'),
         ("go", 'package main\nconst adminToken = "a" + "b"\nfunc main() {}\n'),
         ("rust", 'const ADMIN_TOKEN: &str = "";\nfn handle() {}\n'),

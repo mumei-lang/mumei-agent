@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import ast
+import io
+import tokenize
 from datetime import datetime, timezone
 from fractions import Fraction
 from functools import lru_cache
@@ -754,6 +756,21 @@ def _python_enclosing_function(tree: ast.AST, line: int) -> str | None:
     return innermost.name
 
 
+def _python_single_string_literal(source: str, value_node: ast.AST) -> bool:
+    segment = ast.get_source_segment(source, value_node)
+    if segment is None:
+        return False
+    try:
+        count = sum(
+            1
+            for token in tokenize.generate_tokens(io.StringIO(segment).readline)
+            if token.type == tokenize.STRING
+        )
+    except (IndentationError, SyntaxError, tokenize.TokenError):
+        return False
+    return count == 1
+
+
 def _python_hardcoded_secret_issues(source: str) -> list[ForeignSafetyIssue]:
     try:
         tree = ast.parse(source)
@@ -770,6 +787,8 @@ def _python_hardcoded_secret_issues(source: str) -> list[ForeignSafetyIssue]:
             value_node = node.value
             targets = [node.target]
         if not isinstance(value_node, ast.Constant) or not isinstance(value_node.value, str):
+            continue
+        if not _python_single_string_literal(source, value_node):
             continue
         if _is_placeholder_secret_value(value_node.value):
             continue
