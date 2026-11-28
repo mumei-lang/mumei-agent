@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from agent.audit import build_parser, main
 from agent.audit_models import AuditDirectoryResult, AuditResult
+from agent.audit_reporting import _finalize_audit_result
 from agent.audit_sarif import audit_exit_code, sarif_document, sarif_json
 
 
@@ -53,6 +54,21 @@ def test_exit_code_is_two_for_operational_or_extraction_errors() -> None:
 
     assert audit_exit_code(operational) == 2
     assert audit_exit_code(malformed) == 2
+
+
+def test_high_confidence_policy_catches_hardcoded_credentials() -> None:
+    result = _finalize_audit_result(
+        _file_result(
+            success=False,
+            verification_status="unverifiable",
+            verification_violations=[
+                "Python hardcoded credential constant `ADMIN_TOKEN` is stored directly in source"
+            ],
+        )
+    )
+
+    assert audit_exit_code(result, fail_on="high-confidence") == 1
+    assert audit_exit_code(result, fail_on="never") == 0
 
 
 def test_directory_exit_code_uses_worst_file_result() -> None:

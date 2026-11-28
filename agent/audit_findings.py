@@ -259,6 +259,8 @@ def _violation_confidence(message: str) -> str:
         return "medium"
     if basis == "z3":
         return "high" if "counterexample" in message.lower() or "counter-example" in message.lower() else "medium"
+    if "hardcoded credential" in message.lower():
+        return "high"
     return "medium"
 
 

@@ -31,6 +31,7 @@ def test_code_findings_expose_verification_basis_and_confidence() -> None:
         verification_violations=[
             "body-port: withdraw — status=refuted counterexample {'x': 1}",
             "native-replay: transfer violates contract",
+            "Python hardcoded credential constant `ADMIN_TOKEN` is stored directly in source",
             "checksum mismatch",
         ],
     )
@@ -40,10 +41,14 @@ def test_code_findings_expose_verification_basis_and_confidence() -> None:
     assert rows["body-port: withdraw — status=refuted counterexample {'x': 1}"]["confidence"] == "medium"
     assert rows["native-replay: transfer violates contract"]["verification_basis"] == "native-replay"
     assert rows["native-replay: transfer violates contract"]["confidence"] == "high"
+    hardcoded = rows["Python hardcoded credential constant `ADMIN_TOKEN` is stored directly in source"]
+    assert hardcoded["verification_basis"] == "deterministic-static-analysis"
+    assert hardcoded["confidence"] == "high"
     assert rows["checksum mismatch"]["verification_basis"] == "deterministic-static-analysis"
+    assert rows["checksum mismatch"]["confidence"] == "medium"
     assert all(row["category"] == "code" for row in rows.values())
     assert all(row["triage_bucket"] == "code_review" for row in rows.values())
-    assert len({row["fingerprint"] for row in rows.values()}) == 3
+    assert len({row["fingerprint"] for row in rows.values()}) == 4
 
 
 def test_spec_and_operational_findings_have_separate_categories() -> None:
