@@ -1079,11 +1079,26 @@ def _python_weak_random_only_expression(value: ast.AST | None, random_call: ast.
         return False
     # Precision-first shallow witness: local variables such as scale factors are
     # intentional false negatives rather than scope/dataflow inference.
-    allowed_names = {"random", "int", "str", "hex", "round", "format", "repr"}
+    allowed_names = {"random", "int", "str", "hex", "round", "format", "repr", "hashlib"}
     return not any(
         isinstance(node, ast.Name) and node.id not in allowed_names
         for node in ast.walk(value)
     )
+
+
+def _python_dict_credential_context(value: ast.Dict, random_call: ast.AST) -> bool:
+    for key, item in zip(value.keys, value.values, strict=True):
+        if not (
+            isinstance(key, ast.Constant)
+            and isinstance(key.value, str)
+            and _has_strong_credential_name(key.value)
+        ):
+            continue
+        if _python_weak_random_only_expression(item, random_call):
+            return True
+        if isinstance(item, ast.Dict) and _python_dict_credential_context(item, random_call):
+            return True
+    return False
 
 
 def _python_return_credential_context(return_node: ast.Return, random_call: ast.AST, function_is_credential: bool) -> bool:
@@ -1091,15 +1106,7 @@ def _python_return_credential_context(return_node: ast.Return, random_call: ast.
         return False
     value = return_node.value
     if isinstance(value, ast.Dict):
-        for key, item in zip(value.keys, value.values, strict=True):
-            if (
-                isinstance(key, ast.Constant)
-                and isinstance(key.value, str)
-                and _has_strong_credential_name(key.value)
-                and _python_weak_random_only_expression(item, random_call)
-            ):
-                return True
-        return False
+        return _python_dict_credential_context(value, random_call)
     if isinstance(value, (ast.Tuple, ast.List, ast.Set)):
         return False
     return _python_weak_random_only_expression(value, random_call)
