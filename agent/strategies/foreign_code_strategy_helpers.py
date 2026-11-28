@@ -1121,6 +1121,7 @@ _PYTHON_NONCREDENTIAL_METADATA_KEY_PARTS = frozenset({
     "timeout",
     "timestamp",
     "ttl",
+    "until",
     "validity",
     "wait",
 })
