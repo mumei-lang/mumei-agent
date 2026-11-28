@@ -945,7 +945,7 @@ def _python_timing_credential_issues(source: str) -> list[ForeignSafetyIssue]:
             issues.append(ForeignSafetyIssue(
                 function_name=node.name,
                 message=(f"Python function `{node.name}` uses early-exit credential comparison "
-                         "that may expose a timing side channel"),
+                         f"at line {loop.lineno} that may expose a timing side channel"),
                 line=loop.lineno,
             ))
     return issues

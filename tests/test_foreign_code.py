@@ -9471,6 +9471,32 @@ def token_matches(provided, expected):
         ), (language, source)
 
 
+def test_timing_credential_comparison_same_method_names_have_distinct_messages() -> None:
+    from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
+
+    source = """class First:
+    def token_matches(self, provided, expected):
+        for a, b in zip(provided, expected):
+            if a != b:
+                return False
+        return True
+
+
+class Second:
+    def token_matches(self, provided, expected):
+        for a, b in zip(provided, expected):
+            if a != b:
+                return False
+        return True
+"""
+    issues = [
+        issue for issue in _detect_safety_issues(source, "python")
+        if "timing" in issue.message.lower() and "credential" in issue.message.lower()
+    ]
+    assert len(issues) == 2
+    assert len({issue.message for issue in issues}) == 2
+
+
 def test_timing_credential_comparison_never_outputs_secret_values(capsys, tmp_path, monkeypatch) -> None:
     from agent.strategies.foreign_code_strategy_helpers import _detect_safety_issues
 
