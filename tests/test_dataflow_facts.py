@@ -3059,3 +3059,40 @@ def test_continue_inside_conditionless_loop_does_not_escape() -> None:
     )
     facts = _facts(body, "n / d", param_names={"n", "d", "xs"})
     assert "d" in facts.nonzero
+
+
+def test_assignment_expression_facts_are_position_specific() -> None:
+    from agent import tree_sitter_extract
+    from agent.dataflow_facts import analyze_function
+
+    body = """if cond {
+    if len(xs) == 0 { return 0 }
+    q := total / len(xs)
+} else {
+    q := total / len(xs)
+}
+return q
+"""
+    tree = tree_sitter_extract.extract_statements(body, "go")
+    assert tree is not None
+    positions = []
+
+    def collect(statements) -> None:
+        for statement in statements:
+            if statement.kind in {"define", "assign", "var"}:
+                for index, value in enumerate(statement.values):
+                    if "len(xs)" in value:
+                        positions.append((statement.start, index, value))
+            collect(statement.init)
+            collect(statement.body)
+            collect(statement.orelse)
+            collect(statement.post)
+
+    collect(tree.statements)
+    assert len(positions) == 2
+    flow = analyze_function(body, "go")
+    assert flow is not None
+    guarded = flow.facts_for_assignment_expression(positions[0][2], positions[0][:2])
+    unguarded = flow.facts_for_assignment_expression(positions[1][2], positions[1][:2])
+    assert guarded is not None and "len(xs)" in guarded.nonzero
+    assert unguarded is not None and "len(xs)" not in unguarded.nonzero
