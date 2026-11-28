@@ -70,6 +70,10 @@ def _write_core(tmp_path: Path, *, native_exit=0, artifact_exit=0, runtime_exit=
         "fi\n"
         'if [ "$1" = "native-bundle" ] && [ "$2" = "accept-observations" ]; then\n'
         f'    if [ "$4" != "{BUILD_ID}" ]; then exit 1; fi\n'
+        '    record="$6/native-bundle.json"\n'
+        '    grep -q expected_exit_status "$record" || exit 3\n'
+        '    grep -q expected_stdout_sha256 "$record" || exit 3\n'
+        '    grep -q expected_stderr_sha256 "$record" || exit 3\n'
         f'    if [ "{runtime_exit}" = "0" ]; then printf \'%s\' \'{acceptance}\'; fi\n'
         f"    exit {runtime_exit}\n"
         "fi\n"
@@ -159,13 +163,15 @@ def test_runtime_opt_in_reuses_observations_route(tmp_path, capsys):
     assert role["report"]["sequence"]["selected_result"] is not None
 
 
-def test_runtime_opt_in_without_pins_is_skipped_not_fabricated(tmp_path, capsys):
+def test_runtime_opt_in_without_pins_projects_core_inconclusive(tmp_path, capsys):
     core, bundle, source = _fixture(tmp_path, runtime=False)
     code, out, _ = _run(
         capsys, _argv(core, bundle, source, "--enable-runtime-observations")
     )
-    assert code == 0
-    assert json.loads(out)["roles"]["runtime_observation"]["reason"] == "runtime_observation_pins_absent"
+    assert code == 3
+    role = json.loads(out)["roles"]["runtime_observation"]
+    assert role["status"] == "inconclusive"
+    assert role["reason"] == "core_inconclusive"
 
 
 def test_wrong_build_id_projects_unclaimed_exit_as_inconclusive(tmp_path, capsys):
@@ -184,7 +190,7 @@ def test_wrong_build_id_projects_unclaimed_exit_as_inconclusive(tmp_path, capsys
         assert "recheck" not in roles[name]["report"]
 
 
-def test_partial_runtime_pin_still_enables_opt_in(tmp_path, capsys):
+def test_partial_runtime_pin_projects_core_inconclusive(tmp_path, capsys):
     core, bundle, source = _fixture(tmp_path)
     record = json.loads((bundle / RECORD_FILE).read_text())
     del record["link_build"]["expected_stdout_sha256"]
@@ -193,8 +199,10 @@ def test_partial_runtime_pin_still_enables_opt_in(tmp_path, capsys):
     code, out, _ = _run(
         capsys, _argv(core, bundle, source, "--enable-runtime-observations")
     )
-    assert code == 0
-    assert json.loads(out)["roles"]["runtime_observation"]["status"] == "accepted"
+    assert code == 3
+    role = json.loads(out)["roles"]["runtime_observation"]
+    assert role["status"] == "inconclusive"
+    assert role["reason"] == "core_inconclusive"
 
 
 def test_missing_source_is_static_input_error_without_report(tmp_path, capsys):

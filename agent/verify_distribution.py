@@ -366,20 +366,6 @@ def _proof_certificate_role(args: argparse.Namespace, record: dict) -> dict:
         }
 
 
-def _runtime_pins_present(record: dict) -> bool:
-    link_build = record.get("link_build")
-    if not isinstance(link_build, dict):
-        return False
-    return any(
-        link_build.get(key) is not None
-        for key in (
-            "expected_exit_status",
-            "expected_stdout_sha256",
-            "expected_stderr_sha256",
-        )
-    )
-
-
 def run_distribution(args: argparse.Namespace) -> dict:
     record = _check_common(args)
     initial_inputs = _orchestration_inputs(args)
@@ -397,16 +383,6 @@ def run_distribution(args: argparse.Namespace) -> dict:
         roles["runtime_observation"] = {
             "status": "skipped",
             "reason": "runtime_observations_not_enabled",
-            "checks_not_performed": [
-                "os_exit_status_observation",
-                "os_stdout_observation",
-                "os_stderr_observation",
-            ],
-        }
-    elif not _runtime_pins_present(record):
-        roles["runtime_observation"] = {
-            "status": "skipped",
-            "reason": "runtime_observation_pins_absent",
             "checks_not_performed": [
                 "os_exit_status_observation",
                 "os_stdout_observation",
