@@ -9258,6 +9258,7 @@ def test_hardcoded_secret_name_boundaries() -> None:
     assert not _is_hardcoded_secret_name("keyboard")
     assert not _is_hardcoded_secret_name("AUTH")
     assert not _is_hardcoded_secret_name("AUTHENTICATION")
+    assert not _is_hardcoded_secret_name("CSRF_TOKEN_HEADER")
 
 
 def test_hardcoded_secret_negative_rhs_forms() -> None:
@@ -9265,6 +9266,7 @@ def test_hardcoded_secret_negative_rhs_forms() -> None:
 
     cases = [
         ("python", 'AUTH = "Bearer"\n'),
+        ("python", 'CSRF_TOKEN_HEADER = "X-CSRF-Token"\n'),
         ("python", 'ADMIN_TOKEN = ""\n'),
         ("python", 'ADMIN_TOKEN = "example-value"\n'),
         ("python", 'ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")\n'),

@@ -545,6 +545,17 @@ def _is_hardcoded_secret_name(name: str) -> bool:
         for component in re.split(r"[._$\-]+", name)
         for match in _CREDENTIAL_NAME_PART.finditer(component)
     ]
+    if words and words[-1] in {
+        "header",
+        "headername",
+        "name",
+        "env",
+        "envvar",
+        "variable",
+        "param",
+        "parameter",
+    }:
+        return False
     return bool(
         any(word in _CREDENTIAL_WORDS for word in words)
         or any(pair in _CREDENTIAL_KEY_PAIRS for pair in zip(words, words[1:]))
