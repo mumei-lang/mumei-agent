@@ -10364,6 +10364,7 @@ def make_share_token():
         "session_expires_in": random.random(),
         "token_duration": random.random(),
         "token_lifetime": random.random(),
+        "session_time": random.random(),
         "retry_token": random.random(),
         "retry_wait_for_session": random.random(),
     }
