@@ -766,8 +766,11 @@ def _python_definition_index(source: str) -> tuple[dict[str, tuple[int, int]], d
     """Map Python function definitions to their source spans.
 
     Returns ``(qualified, leaf_spans)`` where ``qualified`` maps dotted names
-    (``Class.method``, ``function``) to ``(lineno, end_lineno)`` and
-    ``leaf_spans`` maps each leaf name to every span defining it. Returns
+    (``Class.method``, ``function``) to every ``(lineno, end_lineno)`` span
+    defining that name and ``leaf_spans`` maps each leaf name to every span
+    defining it. A name can have several spans (for example the same class
+    path defined in both branches of a conditional); such names are
+    ambiguous and callers must not resolve or deduplicate them. Returns
     ``None`` when the source cannot be parsed, in which case no name can be
     resolved and callers must not deduplicate anything.
     """
@@ -775,7 +778,7 @@ def _python_definition_index(source: str) -> tuple[dict[str, tuple[int, int]], d
         tree = ast.parse(source)
     except (SyntaxError, ValueError):
         return None
-    qualified: dict[str, tuple[int, int]] = {}
+    qualified: dict[str, list[tuple[int, int]]] = {}
     leaf_spans: dict[str, list[tuple[int, int]]] = {}
 
     def visit(node: ast.AST, prefix: str) -> None:
@@ -783,7 +786,7 @@ def _python_definition_index(source: str) -> tuple[dict[str, tuple[int, int]], d
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 qualname = f"{prefix}.{child.name}" if prefix else child.name
                 span = (child.lineno, child.end_lineno or child.lineno)
-                qualified.setdefault(qualname, span)
+                qualified.setdefault(qualname, []).append(span)
                 leaf_spans.setdefault(child.name, []).append(span)
                 visit(child, qualname)
             elif isinstance(child, ast.ClassDef):
@@ -797,7 +800,7 @@ def _python_definition_index(source: str) -> tuple[dict[str, tuple[int, int]], d
 
 def _resolve_python_definition_span(
     function_name: str,
-    qualified: dict[str, tuple[int, int]],
+    qualified: dict[str, list[tuple[int, int]]],
     leaf_spans: dict[str, list[tuple[int, int]]],
 ) -> tuple[int, int] | None:
     """Resolve a hint function name to one definition span, or ``None``.
@@ -809,8 +812,9 @@ def _resolve_python_definition_span(
     the caller never deduplicates on a guess.
     """
     if "." in function_name:
-        return qualified.get(function_name)
-    spans = leaf_spans.get(function_name, [])
+        spans = qualified.get(function_name, [])
+    else:
+        spans = leaf_spans.get(function_name, [])
     if len(spans) == 1:
         return spans[0]
     return None

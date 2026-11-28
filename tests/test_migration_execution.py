@@ -1345,3 +1345,33 @@ def test_migration_execution_keeps_distinct_skeletons_for_the_same_definition(tm
     # candidates carry distinct review evidence and must not be merged.
     assert len(report["candidates"]) == 2
     assert {c["function_name"] for c in report["candidates"]} == {"resolve", "Resolver.resolve"}
+
+
+def test_migration_execution_never_merges_duplicate_qualified_definitions(tmp_path: Path) -> None:
+    source = tmp_path / "branched.py"
+    source.write_text(
+        "cond = True\n"
+        "if cond:\n"
+        "    class A:\n"
+        "        def f(self) -> int:\n"
+        "            return 1\n"
+        "else:\n"
+        "    class A:\n"
+        "        def f(self) -> int:\n"
+        "            return 2\n",
+        encoding="utf-8",
+    )
+    result = _result(
+        source,
+        [
+            _hint("A.f", "atom af1(x: i64) -> i64 {\n    requires: x >= 0;\n    ensures: result >= 0;\n    body: {\n        x\n    }\n}"),
+            _hint("A.f", "atom af1(x: i64) -> i64 {\n    requires: x >= 0;\n    ensures: result >= 0;\n    body: {\n        x\n    }\n}"),
+        ],
+    )
+    output = tmp_path / "execution.json"
+
+    report = build_migration_execution(result, output_path=output, mumei_client=FakeVerifyClient())
+
+    # `A.f` is defined twice in the conditional branches, so even identical
+    # qualified hints must stay unresolved and unmerged.
+    assert len(report["candidates"]) == 2
