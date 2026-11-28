@@ -10742,3 +10742,218 @@ func viewItem(item *Item) string {
         assert _violation_confidence(hits[0]) == "medium"
         for value in forbidden:
             assert value not in hits[0]
+
+
+def test_python_split_positive_literal_index_is_medium_witness() -> None:
+    inline = '''
+def subcategory(label: str) -> str:
+    return label.split(":")[1]
+'''
+    assigned = '''
+def subcategory(label: str) -> str:
+    parts = label.split(":")
+    return parts[2]
+'''
+    for source in (inline, assigned):
+        issues = [i for i in _detect_safety_issues(source, "python") if "positive literal index" in i.message]
+        assert len(issues) == 1
+        assert issues[0].function_name == "subcategory"
+        assert issues[0].confidence == "medium"
+        assert "`1`" not in issues[0].message
+        assert "`2`" not in issues[0].message
+        assert "label" not in issues[0].message
+        assert "parts" not in issues[0].message
+        assert not issues[0].counterexample
+
+
+def test_python_split_index_negative_controls() -> None:
+    sources = {
+        "zero_index": 'def f(label):\n    return label.split(":")[0]\n',
+        "negative_index": 'def f(label):\n    return label.split(":")[-1]\n',
+        "computed_index": 'def f(label):\n    return label.split(":")[0 + 1]\n',
+        "slice": 'def f(label):\n    return label.split(":")[1:]\n',
+        "fixed_literal": 'def f():\n    parts = ["group", "name"]\n    return parts[1]\n',
+        "non_split_receiver": 'def f(label):\n    parts = label.partition(":")\n    return parts[1]\n',
+        "reassigned": 'def f(label):\n    parts = label.split(":")\n    parts = label.split(":")\n    return parts[1]\n',
+        "exiting_len_guard": 'def f(label):\n    parts = label.split(":")\n    if len(parts) <= 1:\n        raise ValueError("short")\n    return parts[1]\n',
+        "outer_guard_nested_use": 'def f(label, cond):\n    parts = label.split(":")\n    if len(parts) <= 1:\n        raise ValueError("short")\n    if cond:\n        return parts[1]\n    return ""\n',
+        "continue_len_guard": 'def f(lines):\n    for line in lines:\n        parts = line.split(":")\n        if len(parts) <= 1:\n            continue\n        return parts[1]\n    return ""\n',
+    }
+    for name, source in sources.items():
+        assert not [i for i in _detect_safety_issues(source, "python") if "positive literal index" in i.message], name
+
+    non_exiting_guard = 'def f(label):\n    parts = label.split(":")\n    if len(parts) <= 1:\n        print("short")\n    return parts[1]\n'
+    other_variable_guard = 'def f(label, other):\n    parts = label.split(":")\n    if len(other) <= 1:\n        raise ValueError("short")\n    return parts[1]\n'
+    positive_len_guard = 'def f(label):\n    parts = label.split(":")\n    if len(parts) > 1:\n        return parts[1]\n    return ""\n'
+    insufficient_guard = 'def f(label):\n    parts = label.split(":")\n    if len(parts) <= 1:\n        raise ValueError("short")\n    return parts[2]\n'
+    guard_body_use = 'def f(label):\n    parts = label.split(":")\n    if len(parts) <= 1:\n        return parts[1]\n    return ""\n'
+    for source in (non_exiting_guard, other_variable_guard, positive_len_guard, insufficient_guard, guard_body_use):
+        assert [i for i in _detect_safety_issues(source, "python") if "positive literal index" in i.message]
+
+
+def test_go_split_positive_literal_index_is_medium_witness() -> None:
+    split_source = '''package main
+func itemHandler() string {
+    pathParts := strings.Split("/"+path, "/")
+    sku := pathParts[3]
+    return sku
+}
+'''
+    fields_source = '''package main
+func firstArgs(line string) string {
+    parts := strings.Fields(line)
+    return parts[1]
+}
+'''
+    inline_source = '''package main
+func inlinePart() string {
+    return strings.Split(path, "/")[3]
+}
+'''
+    var_source = '''package main
+func varPart() string {
+    var parts []string = strings.Split(path, "/")
+    return parts[1]
+}
+'''
+    for source, function_name in ((split_source, "itemHandler"), (fields_source, "firstArgs"), (inline_source, "inlinePart"), (var_source, "varPart")):
+        issues = [i for i in _detect_safety_issues(source, "go") if "positive literal index" in i.message]
+        assert len(issues) == 1
+        assert issues[0].function_name == function_name
+        assert issues[0].confidence == "medium"
+        assert "pathParts" not in issues[0].message
+        assert "parts" not in issues[0].message
+        assert "path" not in issues[0].message
+        assert "`3`" not in issues[0].message
+        assert not issues[0].counterexample
+
+
+def test_go_split_index_negative_controls() -> None:
+    template = '''package main
+func f() string {
+%s
+}
+'''
+    bodies = {
+        "zero_index": '    parts := strings.Split(path, "/")\n    return parts[0]\n',
+        "computed_index": '    parts := strings.Split(path, "/")\n    return parts[1+0]\n',
+        "slice": '    parts := strings.Split(path, "/")\n    return parts[1:]\n',
+        "fixed_literal": '    parts := []string{"a", "b"}\n    return parts[1]\n',
+        "non_split_receiver": '    parts := strings.SplitAfter(path, "/")\n    return parts[1]\n',
+        "reassigned": '    parts := strings.Split(path, "/")\n    parts = strings.Split(path, "/")\n    return parts[1]\n',
+        "exiting_len_guard": '    parts := strings.Split(path, "/")\n    if len(parts) < 4 {\n        return ""\n    }\n    return parts[3]\n',
+        "continue_len_guard": '    for _, line := range lines {\n        parts := strings.Fields(line)\n        if len(parts) < 5 {\n            continue\n        }\n        return parts[4]\n    }\n    return ""\n',
+        "continue_len_guard_composite_literal": '    for _, line := range lines {\n        fields := strings.Fields(line)\n        if len(fields) < 5 {\n            continue\n        }\n        entries = append(entries, record{path: fields[2], latency: fields[4]})\n    }\n    return ""\n',
+    }
+    for name, body in bodies.items():
+        assert not [i for i in _detect_safety_issues(template % body, "go") if "positive literal index" in i.message], name
+
+    non_exiting_guard = '    parts := strings.Split(path, "/")\n    if len(parts) < 4 {\n        println("short")\n    }\n    return parts[3]\n'
+    other_variable_guard = '    parts := strings.Split(path, "/")\n    if len(other) < 4 {\n        return ""\n    }\n    return parts[3]\n'
+    for body in (non_exiting_guard, other_variable_guard):
+        assert [i for i in _detect_safety_issues(template % body, "go") if "positive literal index" in i.message]
+
+
+def test_rust_split_positive_literal_index_is_medium_witness() -> None:
+    whitespace_source = '''fn read_request() -> String {
+    let parts: Vec<&str> = request_line.split_whitespace().collect();
+    let method = parts[0].to_string();
+    let target = parts[1].to_string();
+    target
+}
+'''
+    split_source = '''fn parse() -> String {
+    let parts = line.split(':').collect::<Vec<_>>();
+    parts[2].to_string()
+}
+'''
+    inline_source = '''fn direct_part() -> String {
+    line.split(':').collect::<Vec<_>>()[1].to_string()
+}
+'''
+    for source, function_name in ((whitespace_source, "read_request"), (split_source, "parse"), (inline_source, "direct_part")):
+        issues = [i for i in _detect_safety_issues(source, "rust") if "positive literal index" in i.message]
+        assert len(issues) == 1
+        assert issues[0].function_name == function_name
+        assert issues[0].confidence == "medium"
+        assert "parts" not in issues[0].message
+        assert "request_line" not in issues[0].message
+        assert "line" not in issues[0].message
+        assert "`1`" not in issues[0].message
+        assert not issues[0].counterexample
+
+
+def test_rust_split_index_negative_controls() -> None:
+    template = '''fn f() -> String {
+%s
+}
+'''
+    bodies = {
+        "zero_index": '    let parts: Vec<&str> = line.split(\',\').collect();\n    parts[0].to_string()\n',
+        "computed_index": '    let parts: Vec<&str> = line.split(\',\').collect();\n    parts[0 + 1].to_string()\n',
+        "slice": '    let parts: Vec<&str> = line.split(\',\').collect();\n    parts[1..].join(",")\n',
+        "fixed_literal": '    let parts = vec!["a", "b"];\n    parts[1].to_string()\n',
+        "non_split_receiver": '    let parts: Vec<&str> = line.split_terminator(\',\').collect();\n    parts[1].to_string()\n',
+        "not_vec_collect": '    let parts = line.split(\',\').collect();\n    parts[1].to_string()\n',
+        "vecdeque_annotation": '    let parts: VecDeque<&str> = line.split(\',\').collect();\n    parts[1].to_string()\n',
+        "custom_annotation": '    let parts: Parts = line.split(\',\').collect();\n    parts[1].to_string()\n',
+        "reassigned": '    let parts: Vec<&str> = line.split(\',\').collect();\n    let parts = line.split(\',\').collect::<Vec<_>>();\n    parts[1].to_string()\n',
+        "exiting_len_guard": '    let parts: Vec<&str> = line.split(\',\').collect();\n    if parts.len() < 2 {\n        return String::new();\n    }\n    parts[1].to_string()\n',
+    }
+    for name, body in bodies.items():
+        assert not [i for i in _detect_safety_issues(template % body, "rust") if "positive literal index" in i.message], name
+
+    non_exiting_guard = '    let parts: Vec<&str> = line.split(\',\').collect();\n    if parts.len() < 2 {\n        println!("short");\n    }\n    parts[1].to_string()\n'
+    other_variable_guard = '    let parts: Vec<&str> = line.split(\',\').collect();\n    if other.len() < 2 {\n        return String::new();\n    }\n    parts[1].to_string()\n'
+    for body in (non_exiting_guard, other_variable_guard):
+        assert [i for i in _detect_safety_issues(template % body, "rust") if "positive literal index" in i.message]
+
+    continue_guard = '    for line in lines {\n        let parts: Vec<&str> = line.split(\',\').collect();\n        if parts.len() < 2 {\n            continue;\n        }\n        return parts[1].to_string();\n    }\n    String::new()\n'
+    assert not [i for i in _detect_safety_issues(template % continue_guard, "rust") if "positive literal index" in i.message]
+
+
+def test_split_index_fixed_specimen_shapes_are_negative_controls() -> None:
+    python_fixed = '''
+def subcategory(label: str) -> str:
+    _, sep, rest = label.partition(":")
+    return rest if sep else label
+'''
+    go_fixed = '''package main
+func itemHandler() string {
+    sku := strings.TrimPrefix(path, "/items/")
+    if sku == "" || sku == path || strings.Contains(sku, "/") {
+        return ""
+    }
+    return sku
+}
+'''
+    rust_fixed = '''fn read_request() -> Result<String, String> {
+    let parts: Vec<&str> = request_line.split_whitespace().collect();
+    if parts.len() < 2 {
+        return Err("malformed".into());
+    }
+    let target = parts[1].to_string();
+    Ok(target)
+}
+'''
+    assert not [i for i in _detect_safety_issues(python_fixed, "python") if "positive literal index" in i.message]
+    assert not [i for i in _detect_safety_issues(go_fixed, "go") if "positive literal index" in i.message]
+    assert not [i for i in _detect_safety_issues(rust_fixed, "rust") if "positive literal index" in i.message]
+
+
+def test_split_index_medium_witnesses_reach_verifier_errors_without_index_details() -> None:
+    mumei = MagicMock()
+    mumei.verify.return_value = {"success": True, "report": {"status": "verified"}, "stdout": "{}", "stderr": ""}
+    cases = [
+        ("python", 'def subcategory(label):\n    return label.split(":")[1]\n', ("label", "1")),
+        ("go", 'package main\nfunc itemHandler() string {\n    pathParts := strings.Split("/"+path, "/")\n    return pathParts[3]\n}\n', ("pathParts", "path", "3")),
+        ("rust", 'fn read_request() -> String {\n    let parts: Vec<&str> = request_line.split_whitespace().collect();\n    parts[1].to_string()\n}\n', ("parts", "request_line", "1")),
+    ]
+    for language, source, forbidden in cases:
+        result = ForeignCodeVerifier(mumei_client=mumei).verify(source, language)
+        hits = [error for error in result["errors"] if "positive literal index" in error]
+        assert len(hits) == 1, (language, result["errors"])
+        from agent.audit_findings import _violation_confidence
+        assert _violation_confidence(hits[0]) == "medium"
+        for value in forbidden:
+            assert value not in hits[0]
