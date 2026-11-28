@@ -1118,7 +1118,6 @@ _PYTHON_NONCREDENTIAL_METADATA_KEY_PARTS = frozenset({
     "retry",
     "seconds",
     "sleep",
-    "time",
     "timeout",
     "timestamp",
     "ttl",
@@ -1131,12 +1130,15 @@ def _python_noncredential_metadata_key(key: ast.AST) -> bool:
     if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
         return True
     parts = _name_parts(key.value)
-    metadata_parts = {
-        part
-        for index, part in enumerate(parts)
-        if not (part == "time" and index > 0 and parts[index - 1] == "one")
-    }
-    return bool(metadata_parts.intersection(_PYTHON_NONCREDENTIAL_METADATA_KEY_PARTS))
+    if any(part in _PYTHON_NONCREDENTIAL_METADATA_KEY_PARTS for part in parts):
+        return True
+    credential_indexes = [index for index, part in enumerate(parts) if part in _STRONG_CREDENTIAL_WORDS]
+    if not credential_indexes:
+        return True
+    return any(
+        part == "time" and not (index > 0 and parts[index - 1] == "one")
+        for index, part in enumerate(parts[max(credential_indexes) + 1:], start=max(credential_indexes) + 1)
+    )
 
 
 def _python_dict_credential_context(value: ast.Dict, random_call: ast.AST) -> bool:
