@@ -1092,24 +1092,25 @@ def _python_insecure_randomness_issues(source: str) -> list[ForeignSafetyIssue]:
                 and node.func.value.id == "random"
             ):
                 continue
-            credential_context = function_is_credential
-            if not credential_context:
-                cursor = node
-                while cursor in parents and parents[cursor] is not function:
-                    cursor = parents[cursor]
-                    if isinstance(cursor, ast.Assign):
-                        credential_context = any(
-                            _has_strong_credential_name(name)
-                            for target in cursor.targets
-                            for name in _python_target_names(target)
-                        )
-                    elif isinstance(cursor, ast.AnnAssign):
-                        credential_context = any(
-                            _has_strong_credential_name(name)
-                            for name in _python_target_names(cursor.target)
-                        )
-                    if credential_context:
-                        break
+            credential_context = False
+            cursor = node
+            while cursor in parents and parents[cursor] is not function:
+                cursor = parents[cursor]
+                if isinstance(cursor, ast.Return):
+                    credential_context = function_is_credential
+                elif isinstance(cursor, ast.Assign):
+                    credential_context = any(
+                        _has_strong_credential_name(name)
+                        for target in cursor.targets
+                        for name in _python_target_names(target)
+                    )
+                elif isinstance(cursor, ast.AnnAssign):
+                    credential_context = any(
+                        _has_strong_credential_name(name)
+                        for name in _python_target_names(cursor.target)
+                    )
+                if credential_context:
+                    break
             if credential_context:
                 issues.append(ForeignSafetyIssue(
                     function_name=function.name,

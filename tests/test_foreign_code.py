@@ -10208,3 +10208,16 @@ export function resolveLink(otherLinks: Map<string, object>, code: string): obje
 }
 '''
     assert not [i for i in _detect_safety_issues(source, "typescript") if "weak randomness" in i.message]
+
+
+def test_python_insecure_randomness_jitter_in_credential_function_is_negative_control() -> None:
+    source = '''
+import random
+import secrets
+
+def make_share_token() -> str:
+    delay = random.random()
+    token = secrets.token_hex(16)
+    return token
+'''
+    assert not [i for i in _detect_safety_issues(source, "python") if "weak randomness" in i.message]
