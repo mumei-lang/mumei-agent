@@ -276,12 +276,15 @@ def verify_artifact(
     for candidate in candidates:
         generated_mm = candidate.get("generated_mm")
         verification = candidate.get("verification")
-        if isinstance(generated_mm, dict) and _validate_file_claim(
+        generated_mm_valid = isinstance(generated_mm, dict) and _validate_file_claim(
             generated_mm,
             label="generated .mm",
             original_root_text=generated_value,
             generated_root=generated_root,
-        ):
+        )
+        if candidate["execution_state"] == "ready_for_human_review" and not generated_mm_valid:
+            raise ArtifactVerificationError("ready_for_human_review candidate is missing a validated generated .mm artifact")
+        if generated_mm_valid:
             validated_mm += 1
         if isinstance(verification, dict):
             proof = verification.get("proof_certificate")

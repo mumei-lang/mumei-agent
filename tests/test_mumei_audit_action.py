@@ -863,6 +863,20 @@ def test_verify_downloaded_action_artifact_accepts_ready_review_success_path(tmp
     assert "migration execution candidates verified: 1" in completed.stdout
 
 
+def test_verify_downloaded_action_artifact_rejects_ready_candidate_without_generated_mm(tmp_path: Path) -> None:
+    artifact = tmp_path / "evidence"
+    _write_downloaded_action_artifact(artifact, state="ready_for_human_review")
+    execution_path = artifact / "migration-execution" / "migration_execution.json"
+    execution = json.loads(execution_path.read_text(encoding="utf-8"))
+    execution["candidates"][0]["generated_mm"] = {}
+    execution_path.write_text(json.dumps(execution), encoding="utf-8")
+
+    completed = _run_downloaded_artifact_verifier(artifact)
+
+    assert completed.returncode != 0
+    assert "ready_for_human_review candidate is missing" in completed.stderr
+
+
 def test_verify_downloaded_action_artifact_requires_blocked_candidate_only_when_requested(tmp_path: Path) -> None:
     artifact = tmp_path / "evidence"
     _write_downloaded_action_artifact(artifact, state="ready_for_human_review")
