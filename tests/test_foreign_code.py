@@ -9655,7 +9655,7 @@ interface IERC20Like {
 interface IERC20NoBool {
     function transfer(address to, uint256 amount) external returns (uint256);
 }
-contract Token { function transfer(address to, uint256 amount) external returns (bool) {} }
+contract Token { function transfer(address to, uint256 amount) external returns (uint256) { return 1; } }
 contract CustomCaller {
     function call(bytes memory data) external payable returns (uint256) { return 0; }
 }
@@ -9680,6 +9680,13 @@ contract Pool {
         token.transfer(msg.sender, amount);
         noBoolToken.transfer(msg.sender, amount);
         unknownToken.transfer(msg.sender, amount);
+    }
+    function parameterShadow(Token rewardToken, uint256 amount) public {
+        rewardToken.transfer(msg.sender, amount);
+    }
+    function localShadow(uint256 amount) public {
+        Token rewardToken;
+        rewardToken.transfer(msg.sender, amount);
     }
 }
 '''

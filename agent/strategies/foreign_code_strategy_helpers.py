@@ -10007,6 +10007,20 @@ def _solidity_parameter_type(source: str, node) -> str:
     return _solidity_node_text(source, node.child_by_field_name("type")).strip()
 
 
+def _solidity_shadowed_variable_names(source: str, function_node) -> set[str]:
+    """Local parameter/variable names that conservatively shadow state variables."""
+    names: set[str] = set()
+    stack = [function_node]
+    while stack:
+        node = stack.pop()
+        if node.type in {"parameter", "variable_declaration"}:
+            name = _solidity_node_text(source, node.child_by_field_name("name"))
+            if name:
+                names.add(name)
+        stack.extend(node.children)
+    return names
+
+
 def _solidity_bool_transfer_interfaces(source: str, root) -> set[str]:
     """Same-file interfaces whose direct ``transfer`` signature returns bool."""
     interfaces: set[str] = set()
@@ -10054,7 +10068,7 @@ def _solidity_unchecked_call_issues(source: str) -> list[ForeignSafetyIssue]:
             if name_node is not None and type_node is not None:
                 state_types[_solidity_node_text(source, name_node)] = _solidity_node_text(source, type_node).strip()
 
-        def walk(node, function_name: str) -> None:
+        def walk(node, function_name: str, shadowed_names: set[str]) -> None:
             if node.type == "expression_statement":
                 expression = next((c for c in node.children if c.type == "expression"), None)
                 call = _solidity_unwrap_expression(expression)
@@ -10090,7 +10104,8 @@ def _solidity_unchecked_call_issues(source: str) -> list[ForeignSafetyIssue]:
                         receiver = _solidity_unwrap_expression(function_expr.child_by_field_name("object"))
                         arguments = [c for c in call.children if c.type == "call_argument"]
                         if receiver is not None and receiver.type == "identifier" and len(arguments) == 2:
-                            receiver_type = state_types.get(_solidity_node_text(source, receiver))
+                            receiver_name = _solidity_node_text(source, receiver)
+                            receiver_type = None if receiver_name in shadowed_names else state_types.get(receiver_name)
                             if receiver_type in bool_transfer_interfaces:
                                 kind = "bool-token-transfer"
                     if kind is not None:
@@ -10104,11 +10119,15 @@ def _solidity_unchecked_call_issues(source: str) -> list[ForeignSafetyIssue]:
                             line=node.start_point[0] + 1,
                         ))
             for child in node.children:
-                walk(child, function_name)
+                walk(child, function_name, shadowed_names)
 
         for child in body.children:
             if child.type == "function_definition":
-                walk(child, _solidity_node_text(source, child.child_by_field_name("name")))
+                walk(
+                    child,
+                    _solidity_node_text(source, child.child_by_field_name("name")),
+                    _solidity_shadowed_variable_names(source, child),
+                )
 
     for node in root.children:
         if node.type == "contract_declaration":
