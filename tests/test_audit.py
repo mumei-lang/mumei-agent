@@ -36,6 +36,8 @@ from agent.audit_reporting import (
     _cross_validation_gap_strings,
     _malformed_extraction_issue_strings,
     _spec_health_issue_strings,
+    _generate_directory_next_steps,
+    _record_underspecified_intent,
     _verification_issue_strings,
 )
 from agent.audit_reporting import _verification_status_from_foreign_result
@@ -43,6 +45,7 @@ from agent.code_to_spec import CodeToSpecResult
 from agent.config import AgentConfig
 from agent.dogfood_triage import triage_directory_result
 from agent.mm_migration_advisor import MigrationHint
+from agent.spec_ambiguity import SpecAmbiguity
 from agent.strategies.cross_validation_strategy import CrossValidationReport
 from agent.strategies.foreign_code_strategy import ForeignCodeVerifier
 from agent.strategies.spec_health_strategy import SpecHealthReport
@@ -171,6 +174,160 @@ def test_dogfood_triage_rate_limit_has_priority_over_timeout() -> None:
 
     assert report.unverifiable["skipped_rate_limited"] == ["priority.py"]
     assert report.unverifiable["timeout"] == []
+
+
+def _review_step(action: str, *, priority: str = "medium", command: str = "") -> dict[str, str]:
+    return {"priority": priority, "action": action, "command": command}
+
+
+def _file_result_with_steps(source_file: str, steps: list[dict[str, str]]) -> AuditResult:
+    return AuditResult(
+        success=True,
+        source_file=source_file,
+        language="python",
+        spec_extracted=True,
+        verification_status="verified",
+        next_steps=steps,
+    )
+
+
+def test_directory_next_steps_aggregate_only_top_level_underspecified_rows() -> None:
+    validate_command = "mumei-agent validate-spec --input <spec> --format human"
+    high_step = _review_step(
+        "migrate-suggest で .mm スケルトンを生成",
+        priority="high",
+        command="mumei-agent migrate-suggest --code-file <file> --language <lang> --output generated/mm",
+    )
+    first_steps = [
+        high_step,
+        _review_step(
+            "underspecified な意図を明文化（推測で補完しない）: alpha.requires, alpha.ensures",
+            command=validate_command,
+        ),
+    ]
+    second_steps = [
+        high_step.copy(),
+        _review_step(
+            "underspecified な意図を明文化（推測で補完しない）: beta.requires, beta.ensures, gamma.requires",
+            command=validate_command,
+        ),
+    ]
+    files = [
+        _file_result_with_steps("a.py", first_steps),
+        _file_result_with_steps("b.py", second_steps),
+    ]
+    before_files = copy.deepcopy(files)
+
+    result = AuditDirectoryResult(success=True, source_dir="src", language="python", file_results=files)
+    steps = _generate_directory_next_steps(result)
+
+    aggregate = [step for step in steps if "file_results[].next_steps" in step["action"]]
+    assert len(aggregate) == 1
+    assert aggregate[0]["priority"] == "medium"
+    assert aggregate[0]["command"] == validate_command
+    assert aggregate[0]["action"] == (
+        "underspecified な意図を明文化（推測で補完しない）: "
+        "5件 / 2ファイル。完全な対象一覧は file_results[].next_steps を参照"
+    )
+    assert all("alpha.requires" not in step["action"] and "beta.requires" not in step["action"] for step in steps)
+    assert sum(step == high_step for step in steps) == 1
+    assert files == before_files
+
+
+def test_directory_next_steps_no_underspecified_rows_means_no_synthetic_row() -> None:
+    files = [
+        _file_result_with_steps(
+            "a.py",
+            [_review_step("validate-spec で仕様の矛盾を修正", command="mumei-agent validate-spec --input <spec> --format human")],
+        )
+    ]
+
+    steps = _generate_directory_next_steps(
+        AuditDirectoryResult(success=True, source_dir="src", language="python", file_results=files)
+    )
+
+    assert len(steps) == 1
+    assert "file_results[].next_steps" not in steps[0]["action"]
+    assert steps[0]["action"] == "validate-spec で仕様の矛盾を修正"
+
+
+def test_directory_next_steps_missing_requirement_stays_in_cross_validation_gaps() -> None:
+    missing = "spec ambiguity (missing_requirement): add.requires — no requirement text mentions this atom. Add it."
+    file_result = AuditResult(
+        success=True,
+        source_file="add.py",
+        language="python",
+        spec_extracted=True,
+        verification_status="unverifiable",
+        cross_validation_gaps=[missing],
+    )
+
+    steps = _generate_directory_next_steps(
+        AuditDirectoryResult(success=True, source_dir="src", language="python", file_results=[file_result])
+    )
+
+    assert file_result.cross_validation_gaps == [missing]
+    assert file_result.verification_status == "unverifiable"
+    assert not any("file_results[].next_steps" in step["action"] for step in steps)
+    assert any("欠落要件を追記" in step["action"] for step in steps)
+    assert any("validate-spec-to-code" in step["action"] for step in steps)
+
+
+def test_directory_next_steps_single_file_directory_keeps_file_detail() -> None:
+    detail = _review_step(
+        "underspecified な意図を明文化（推測で補完しない）: only.requires, only.ensures",
+        command="mumei-agent validate-spec --input <spec> --format human",
+    )
+    file_result = _file_result_with_steps("only.py", [detail])
+
+    steps = _generate_directory_next_steps(
+        AuditDirectoryResult(success=True, source_dir="src", language="python", file_results=[file_result])
+    )
+
+    assert len(steps) == 1
+    assert "2件 / 1ファイル" in steps[0]["action"]
+    assert "only.requires" not in steps[0]["action"]
+    assert file_result.next_steps == [detail]
+
+
+def test_directory_next_steps_malformed_underspecified_row_stays_visible() -> None:
+    malformed = _review_step(
+        "underspecified な意図を明文化（推測で補完しない）: ",
+        command="mumei-agent validate-spec --input <spec> --format human",
+    )
+    file_result = _file_result_with_steps("malformed.py", [malformed])
+
+    steps = _generate_directory_next_steps(
+        AuditDirectoryResult(success=True, source_dir="src", language="python", file_results=[file_result])
+    )
+
+    assert steps == [malformed]
+    assert "file_results[].next_steps" not in steps[0]["action"]
+
+
+def test_record_underspecified_intent_single_file_detail_remains_complete() -> None:
+    result = AuditResult(success=True, source_file="one.py", language="python", spec_extracted=True)
+    ambiguities = [
+        SpecAmbiguity(
+            classification="underspecified_intent",
+            subject="alpha.requires",
+            evidence="stated but trivial",
+            clarification="state it explicitly",
+            affects_contract=True,
+        ),
+        SpecAmbiguity(
+            classification="underspecified_intent",
+            subject="alpha.ensures",
+            evidence="stated but trivial",
+            clarification="state it explicitly",
+            affects_contract=True,
+        ),
+    ]
+
+    _record_underspecified_intent(result, ambiguities)
+
+    assert result.next_steps[-1]["action"].endswith("alpha.requires, alpha.ensures")
+    assert "file_results[].next_steps" not in result.next_steps[-1]["action"]
 
 
 def _forge_spec() -> dict[str, object]:

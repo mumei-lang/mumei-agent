@@ -722,6 +722,10 @@ def _generate_next_steps(result: AuditResult) -> list[dict]:
         )
     return steps
 
+_UNDERSPECIFIED_STEP_PREFIX = "underspecified な意図を明文化（推測で補完しない）: "
+_VALIDATE_SPEC_COMMAND = "mumei-agent validate-spec --input <spec> --format human"
+
+
 def _record_underspecified_intent(
     result: AuditResult,
     ambiguities: Sequence[SpecAmbiguity],
@@ -745,21 +749,38 @@ def _record_underspecified_intent(
     result.next_steps.append(
         {
             "priority": "medium",
-            "action": (
-                "underspecified な意図を明文化（推測で補完しない）: "
-                + ", ".join(subjects)
-            ),
-            "command": "mumei-agent validate-spec --input <spec> --format human",
+            "action": _UNDERSPECIFIED_STEP_PREFIX + ", ".join(subjects),
+            "command": _VALIDATE_SPEC_COMMAND,
         }
     )
+
+
+def _underspecified_subject_count(step: dict) -> int:
+    """Count subjects in the existing human-review row for display aggregation."""
+    action = _string_value(step.get("action"), "")
+    if not action.startswith(_UNDERSPECIFIED_STEP_PREFIX):
+        return 0
+    subjects = action[len(_UNDERSPECIFIED_STEP_PREFIX):]
+    return len([subject for subject in subjects.split(", ") if subject])
 
 
 def _generate_directory_next_steps(result: AuditDirectoryResult) -> list[dict]:
     aggregated: list[dict] = []
     seen: set[tuple[str, str, str]] = set()
+    underspecified_insert_at: int | None = None
+    underspecified_file_count = 0
+    underspecified_subject_count = 0
     for file_result in result.file_results:
         file_steps = file_result.next_steps or _generate_next_steps(file_result)
+        file_has_underspecified = False
         for step in file_steps:
+            subject_count = _underspecified_subject_count(step)
+            if subject_count:
+                if underspecified_insert_at is None:
+                    underspecified_insert_at = len(aggregated)
+                underspecified_subject_count += subject_count
+                file_has_underspecified = True
+                continue
             key = (
                 _string_value(step.get("priority"), ""),
                 _string_value(step.get("action"), ""),
@@ -769,6 +790,21 @@ def _generate_directory_next_steps(result: AuditDirectoryResult) -> list[dict]:
                 continue
             seen.add(key)
             aggregated.append(step)
+        if file_has_underspecified:
+            underspecified_file_count += 1
+    if underspecified_file_count:
+        aggregated.insert(
+            len(aggregated) if underspecified_insert_at is None else underspecified_insert_at,
+            {
+                "priority": "medium",
+                "action": (
+                    _UNDERSPECIFIED_STEP_PREFIX
+                    + f"{underspecified_subject_count}件 / {underspecified_file_count}ファイル。"
+                    + "完全な対象一覧は file_results[].next_steps を参照"
+                ),
+                "command": _VALIDATE_SPEC_COMMAND,
+            },
+        )
     if result.trusted_atoms:
         atoms = ", ".join(
             _string_value(entry.get("atom"), "?")
