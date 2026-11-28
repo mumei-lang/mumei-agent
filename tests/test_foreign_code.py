@@ -10221,3 +10221,28 @@ def make_share_token() -> str:
     return token
 '''
     assert not [i for i in _detect_safety_issues(source, "python") if "weak randomness" in i.message]
+
+
+def test_go_insecure_randomness_parallel_assignment_pairs_lhs_and_rhs() -> None:
+    mixed_parallel = '''package auth
+import (
+    "fmt"
+    "time"
+)
+func loginHandler() string {
+    token, logID := secureRandom(), fmt.Sprintf("%d", time.Now().UnixNano())
+    return token + logID
+}
+'''
+    weak_parallel = '''package auth
+import (
+    "fmt"
+    "time"
+)
+func loginHandler() string {
+    logID, token := fmt.Sprintf("%d", time.Now().UnixNano()), fmt.Sprintf("%d", time.Now().UnixNano())
+    return token + logID
+}
+'''
+    assert not [i for i in _detect_safety_issues(mixed_parallel, "go") if "credential material" in i.message]
+    assert [i for i in _detect_safety_issues(weak_parallel, "go") if "credential material" in i.message]

@@ -1207,14 +1207,15 @@ def _go_insecure_randomness_issues(source: str) -> list[ForeignSafetyIssue]:
             expression_lists = [child for child in node.children if child.type == "expression_list"]
             if len(expression_lists) < 2:
                 continue
-            lhs_names = [
-                _node_text(source_bytes, child)
-                for child in _tree_nodes(expression_lists[0])
-                if child.type == "identifier"
-            ]
-            if not any(_has_strong_credential_name(name) for name in lhs_names):
-                continue
-            if not _go_direct_timestamp_sprintf(expression_lists[1], source_bytes):
+            lhs_nodes = [child for child in expression_lists[0].named_children if child.type == "identifier"]
+            rhs_nodes = list(expression_lists[1].named_children)
+            credential_timestamp = any(
+                index < len(rhs_nodes)
+                and _has_strong_credential_name(_node_text(source_bytes, lhs))
+                and _go_direct_timestamp_sprintf(rhs_nodes[index], source_bytes)
+                for index, lhs in enumerate(lhs_nodes)
+            )
+            if not credential_timestamp:
                 continue
             issues.append(ForeignSafetyIssue(
                 function_name=function_name,
