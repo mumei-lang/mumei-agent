@@ -2185,29 +2185,50 @@ def _rust_collection_len_division_issues(
             continue
         guards.append((receiver, statement.start_byte, statement.end_byte))
 
+    def inside_exiting_branch(node) -> bool:
+        current = node.parent
+        while current is not None:
+            if current.type == "if_expression":
+                consequence = current.child_by_field_name("consequence")
+                if (
+                    consequence is not None
+                    and consequence.start_byte <= node.start_byte < consequence.end_byte
+                    and exits_directly(consequence)
+                ):
+                    return True
+            current = current.parent
+        return False
+
     def receiver_write_positions(node, receiver: str, start: int) -> list[int]:
         positions: list[int] = []
         if node.start_byte < start:
             # The guard itself ends at ``start``; only later writes matter.
             if node.end_byte <= start:
                 return positions
+
+        def record_write() -> None:
+            if not inside_exiting_branch(node):
+                positions.append(node.start_byte)
+
         if node.type == "assignment_expression":
             left = node.child_by_field_name("left")
             if left is not None and left.type == "identifier" and text(left) == receiver:
-                positions.append(node.start_byte)
+                record_write()
         if node.type == "let_declaration" and receiver in pattern_binding_identifiers(
             node.child_by_field_name("pattern")
         ):
-            positions.append(node.start_byte)
+            record_write()
         if node.type == "reference_expression":
             value = node.child_by_field_name("value")
+            while value is not None and value.type == "parenthesized_expression" and value.named_children:
+                value = value.named_children[0]
             if (
                 value is not None
                 and value.type == "identifier"
                 and text(value) == receiver
                 and any(child.type == "mutable_specifier" for child in node.children)
             ):
-                positions.append(node.start_byte)
+                record_write()
         for child in node.named_children:
             positions.extend(receiver_write_positions(child, receiver, start))
         return positions
