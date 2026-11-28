@@ -2073,6 +2073,12 @@ def _rust_collection_len_division_issues(
                 for child in pattern.named_children
                 if child.type == "shorthand_field_identifier"
             }
+        if pattern.type == "match_pattern":
+            return (
+                pattern_binding_identifiers(pattern.named_children[0])
+                if pattern.named_children
+                else set()
+            )
         if pattern.type == "tuple_struct_pattern":
             names: set[str] = set()
             for child in pattern.named_children[1:]:
@@ -2239,7 +2245,8 @@ def _rust_collection_len_division_issues(
             continue
         guards.append((receiver, statement.start_byte, statement.end_byte))
 
-    def inside_exiting_branch(node) -> bool:
+    def exiting_branch_ranges(node) -> tuple[tuple[int, int], ...]:
+        ranges: list[tuple[int, int]] = []
         current = node.parent
         while current is not None:
             if current.type == "if_expression":
@@ -2249,20 +2256,19 @@ def _rust_collection_len_division_issues(
                     and consequence.start_byte <= node.start_byte < consequence.end_byte
                     and exits_directly(consequence)
                 ):
-                    return True
+                    ranges.append((consequence.start_byte, consequence.end_byte))
             current = current.parent
-        return False
+        return tuple(ranges)
 
-    def receiver_write_positions(node, receiver: str, start: int) -> list[int]:
-        positions: list[int] = []
+    def receiver_write_positions(node, receiver: str, start: int) -> list[tuple[int, tuple[tuple[int, int], ...]]]:
+        positions: list[tuple[int, tuple[tuple[int, int], ...]]] = []
         if node.start_byte < start:
             # The guard itself ends at ``start``; only later writes matter.
             if node.end_byte <= start:
                 return positions
 
         def record_write() -> None:
-            if not inside_exiting_branch(node):
-                positions.append(node.start_byte)
+            positions.append((node.start_byte, exiting_branch_ranges(node)))
 
         if node.type == "assignment_expression":
             left = node.child_by_field_name("left")
@@ -2315,13 +2321,25 @@ def _rust_collection_len_division_issues(
             if is_shadowed_at(receiver, node.start_byte):
                 continue
             writes = receiver_write_positions(block, receiver, guard_end)
-            if any(position < node.start_byte for position in writes):
+
+            def write_is_relevant(position: int, branches: tuple[tuple[int, int], ...]) -> bool:
+                return not any(
+                    branch_start <= position < branch_end
+                    and not (branch_start <= node.start_byte < branch_end)
+                    for branch_start, branch_end in branches
+                )
+
+            if any(
+                position < node.start_byte and write_is_relevant(position, branches)
+                for position, branches in writes
+            ):
                 continue
             loops = enclosing_loops(node)
             if loops and any(
                 loop.start_byte <= position < loop.end_byte
+                and write_is_relevant(position, branches)
                 for loop in loops
-                for position in writes
+                for position, branches in writes
             ):
                 continue
             return True
@@ -6900,7 +6918,7 @@ def _go_assignment_division_expressions(body: str) -> tuple[tuple[str, frozenset
                     if findings is not None and any("len(" in divisor for divisor in findings.divisors):
                         expressions.append((value, frozenset(shadowed)))
             nested_shadowed = frozenset(shadowed)
-            if statement.kind in {"if", "for"}:
+            if statement.kind in {"if", "for", "switch"}:
                 init_defined = {
                     target
                     for init in statement.init
@@ -6909,6 +6927,13 @@ def _go_assignment_division_expressions(body: str) -> tuple[tuple[str, frozenset
                     if re.fullmatch(r"[A-Za-z_]\w*", target)
                 }
                 nested_shadowed = frozenset(shadowed | init_defined)
+            elif statement.kind == "range":
+                range_defined = {
+                    target
+                    for target in statement.targets
+                    if re.fullmatch(r"[A-Za-z_]\w*", target)
+                }
+                nested_shadowed = frozenset(shadowed | range_defined)
             visit(statement.init, frozenset(shadowed))
             visit(statement.body, nested_shadowed)
             visit(statement.orelse, nested_shadowed)

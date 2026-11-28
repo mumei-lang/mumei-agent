@@ -8451,8 +8451,22 @@ func closedblockshadow(total int, xs [4]int, cond bool) int {
     assert [i for i in _detect_safety_issues(fixed_minus, "go") if "divide" in i.message]
     assert [i for i in _detect_safety_issues(fixed_shadowed, "go") if "divide" in i.message]
     assert not [i for i in _detect_safety_issues(fixed_minus_one, "go") if "divide" in i.message]
+    range_shadow = """package main
+func rangeshadow(total int, xs [4]int) int {
+    for _, xs := range [][]int{{}} { q := total / len(xs); return q }
+    return 0
+}
+"""
+    switch_shadow = """package main
+func switchshadow(total int, xs [4]int) int {
+    switch xs := []int{}; true { case true: q := total / len(xs); return q }
+    return 0
+}
+"""
     assert not [i for i in _detect_safety_issues(fixed_double_paren, "go") if "divide" in i.message]
     assert not [i for i in _detect_safety_issues(closed_block_shadow, "go") if "divide" in i.message]
+    assert [i for i in _detect_safety_issues(range_shadow, "go") if "divide" in i.message]
+    assert [i for i in _detect_safety_issues(switch_shadow, "go") if "divide" in i.message]
 
 
 def test_rust_collection_len_divisor_detected_only_without_empty_guard() -> None:
@@ -8682,7 +8696,23 @@ fn f(total: i64, xs: &[i64], config: Config) -> i64 {
 """
     assert not [i for i in _detect_safety_issues(closed_scope_shadow, "rust") if "divide" in i.message]
     assert [i for i in _detect_safety_issues(active_scope_shadow, "rust") if "divide" in i.message]
+    exiting_branch_write_before_return = """fn f(amount: i64, mut xs: &[i64], cond: bool) -> i64 {
+    if xs.is_empty() { return 0 }
+    if cond { xs = &[]; return amount / xs.len() as i64 }
+    amount / xs.len() as i64
+}
+"""
+    match_guard_not_binding = """fn f(amount: i64, mut xs: &[i64], n: usize) -> i64 {
+    if xs.is_empty() { return 0 }
+    match n {
+        m if xs.len() == m => { xs = &[]; amount / xs.len() as i64 }
+        _ => 0
+    }
+}
+"""
     assert [i for i in _detect_safety_issues(if_let_shadow, "rust") if "divide" in i.message]
+    assert [i for i in _detect_safety_issues(exiting_branch_write_before_return, "rust") if "divide" in i.message]
+    assert [i for i in _detect_safety_issues(match_guard_not_binding, "rust") if "divide" in i.message]
 
 
 def test_rust_arbitrary_member_divisor_remains_conservative() -> None:
