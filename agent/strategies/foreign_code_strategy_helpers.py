@@ -10115,17 +10115,17 @@ def _solidity_unchecked_call_issues(source: str) -> list[ForeignSafetyIssue]:
                             detail = "discards the boolean return of an ERC20-like token transfer"
                         issues.append(ForeignSafetyIssue(
                             function_name=function_name,
-                            message=f"Solidity function `{function_name}` {detail}",
+                            message=f"Solidity function `{function_name}` {detail} at line {node.start_point[0] + 1}",
                             line=node.start_point[0] + 1,
                         ))
             for child in node.children:
                 walk(child, function_name, shadowed_names)
 
         for child in body.children:
-            if child.type == "function_definition":
+            if child.type in {"function_definition", "constructor_definition"}:
                 walk(
                     child,
-                    _solidity_node_text(source, child.child_by_field_name("name")),
+                    _solidity_node_text(source, child.child_by_field_name("name")) or "constructor",
                     _solidity_shadowed_variable_names(source, child),
                 )
 

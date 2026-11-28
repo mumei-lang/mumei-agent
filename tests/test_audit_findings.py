@@ -284,3 +284,15 @@ def test_unchecked_call_findings_are_high_confidence() -> None:
     assert rows["Solidity function `payFee` discards the success flag of a low-level value call"]["confidence"] == "high"
     assert rows["Solidity function `getReward` discards the boolean return of an ERC20-like token transfer"]["confidence"] == "high"
     assert rows["checksum mismatch"]["confidence"] == "medium"
+
+
+def test_unchecked_call_confidence_rejects_wrapped_diagnostics() -> None:
+    result = _finalize(
+        success=False,
+        verification_status="unverifiable",
+        verification_violations=[
+            "z3 diagnostic: Solidity function `payFee` discards the success flag of a low-level value call",
+        ],
+    )
+
+    assert result.findings[0]["confidence"] == "medium"

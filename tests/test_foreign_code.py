@@ -9642,8 +9642,8 @@ contract Pool {
 '''
     issues = [i for i in _detect_solidity_contract_issues(source) if "discards" in i.message]
     messages = {i.message for i in issues}
-    assert "Solidity function `payFee` discards the success flag of a low-level value call" in messages
-    assert "Solidity function `getReward` discards the boolean return of an ERC20-like token transfer" in messages
+    assert any(m.startswith("Solidity function `payFee` discards the success flag of a low-level value call at line ") for m in messages)
+    assert any(m.startswith("Solidity function `getReward` discards the boolean return of an ERC20-like token transfer at line ") for m in messages)
     assert all(not i.counterexample for i in issues)
 
 
@@ -9691,6 +9691,28 @@ contract Pool {
 }
 '''
     assert not [i for i in _detect_solidity_contract_issues(source) if "discards" in i.message]
+
+
+
+
+def test_solidity_unchecked_call_distinguishes_sites_and_scans_constructors() -> None:
+    source = '''
+contract Pool {
+    constructor(uint256 fee) {
+        payable(feeRecipient).call{value: fee}("");
+    }
+    function payFees(uint256 fee) internal {
+        payable(feeRecipient).call{value: fee}("");
+        payable(otherRecipient).call{value: fee}("");
+    }
+}
+'''
+    messages = [i.message for i in _detect_solidity_contract_issues(source) if "discards" in i.message]
+    low_level = [m for m in messages if "low-level value call" in m]
+    assert any(m.startswith("Solidity function `constructor`") for m in low_level)
+    pay_fee_messages = [m for m in low_level if "`payFees`" in m]
+    assert len(pay_fee_messages) == 2
+    assert len(set(pay_fee_messages)) == 2
 
 
 def test_solidity_unchecked_call_never_outputs_call_values(capsys) -> None:
